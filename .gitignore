@@ -77,9 +77,10 @@ modelsim.ini
 *.h.orig
 *.vhd.orig
 
-# ---- Editores / IDE ----
+# ---- Editores / IDE / herramientas ----
 .vscode/
 .idea/
+.claude/
 *.swp
 *.swo
 *~
@@ -97,6 +98,14 @@ ehthumbs.db
 *.tmp
 *.orig
 *.swp
+
+# ---- Build artifacts del firmware C (regenerables con `make`) ----
+firmware/*.o
+firmware/*.elf
+firmware/*.bin
+firmware/*.lst
+firmware/*.map
+firmware/main.txt
 
 # =====================================================================
 # Nota: si en algun momento quieres compartir el .sof compilado para

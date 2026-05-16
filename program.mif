@@ -1,13 +1,4 @@
--- =====================================================================
--- program.mif - Rayas diagonales de los 16 colores de la paleta
---
--- Cada word del framebuffer se rellena con un nibble repetido 8 veces.
--- El nibble (color) es el indice del word mod 16. Asi consecutivos
--- words tienen colores 0,1,2,...,15,0,1,...
---
--- Como hay 40 words por fila y los colores ciclan cada 16, cada nueva
--- fila se desplaza 8 pixeles -> aparecen diagonales a 45 grados.
--- =====================================================================
+-- Generado por bin2mif.py - 35/8192 palabras usadas
 WIDTH = 32;
 DEPTH = 8192;
 
@@ -18,35 +9,39 @@ CONTENT
 BEGIN
     [0000..1FFF] : 00000013;
 
-    -- LEDs indicador de "fill iniciado"
-    0000 : F0000537;  -- lui  x10, 0xF0000
-    0001 : 05500593;  -- addi x11, x0, 0x55
-    0002 : 00B52023;  -- sw   x11, 0(x10)
-
-    -- Setup framebuffer
-    0003 : 100000B7;  -- lui  x1, 0x10000      (FB base)
-    0004 : 000081B7;  -- lui  x3, 0x8
-    0005 : D0018193;  -- addi x3, x3, -768     (x3 = 32000)
-    0006 : 00308233;  -- add  x4, x1, x3       (x4 = FB end)
-    0007 : 00000293;  -- addi x5, x0, 0        (x5 = word index)
-
-    -- fill_loop: word(i) = nibble (i mod 16) repetido x8
-    0008 : 00F2F313;  -- andi x6, x5, 0xF      (color = i mod 16)
-    0009 : 00431393;  -- slli x7, x6, 4
-    000A : 0063E3B3;  -- or   x7, x7, x6       (nibble x2 = 8 bits)
-    000B : 00839413;  -- slli x8, x7, 8
-    000C : 00746433;  -- or   x8, x8, x7       (16 bits)
-    000D : 01041493;  -- slli x9, x8, 16
-    000E : 0084E4B3;  -- or   x9, x9, x8       (32 bits, 8 nibbles iguales)
-    000F : 0090A023;  -- sw   x9, 0(x1)
-    0010 : 00408093;  -- addi x1, x1, 4
-    0011 : 00128293;  -- addi x5, x5, 1
-    0012 : FC409CE3;  -- bne  x1, x4, -40      (vuelve al andi)
-
-    -- LEDs indicador de "fill completo"
-    0013 : 0AA00593;  -- addi x11, x0, 0xAA
-    0014 : 00B52023;  -- sw   x11, 0(x10)
-
-    -- Bucle infinito
-    0015 : 0000006F;  -- jal  x0, 0
+    0000 : 00008117;
+    0001 : 00010113;
+    0002 : 00000297;
+    0003 : 08428293;
+    0004 : 00000317;
+    0005 : 07C30313;
+    0006 : 00628863;
+    0007 : 0002A023;
+    0008 : 00428293;
+    0009 : FF5FF06F;
+    000A : 00000097;
+    000B : 00C080E7;
+    000C : 0000006F;
+    000D : F00006B7;
+    000E : 3FF00793;
+    000F : 00F6A023;
+    0010 : 001E87B7;
+    0011 : 48078793;
+    0012 : FFF78793;
+    0013 : FE079EE3;
+    0014 : 010005B7;
+    0015 : 0006A023;
+    0016 : 00000793;
+    0017 : FFF58593;
+    0018 : 00C68613;
+    0019 : 00B7F533;
+    001A : 00A62023;
+    001B : 3FF7F513;
+    001C : 00A6A023;
+    001D : 00262537;
+    001E : 00178793;
+    001F : 5A050513;
+    0020 : FFF50513;
+    0021 : FE051EE3;
+    0022 : FDDFF06F;
 END;

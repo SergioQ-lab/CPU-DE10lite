@@ -81,9 +81,9 @@ architecture Behavioral of soc is
         );
         port (
             I_clk     : in  std_logic;
-            I_addr_a  : in  word_t;
+            I_addr_a  : in  std_logic_vector(ADDR_BITS-1 downto 0);
             O_data_a  : out word_t;
-            I_addr_b  : in  word_t;
+            I_addr_b  : in  std_logic_vector(ADDR_BITS-1 downto 0);
             I_we_b    : in  std_logic;
             I_be_b    : in  std_logic_vector(3 downto 0);
             I_wdata_b : in  word_t;
@@ -92,11 +92,14 @@ architecture Behavioral of soc is
     end component;
 
     component vga_framebuffer is
+        generic (
+            FB_ADDR_BITS : integer := 13
+        );
         port (
             I_clk_50  : in  std_logic;
             I_reset   : in  std_logic;
             I_we      : in  std_logic;
-            I_addr    : in  word_t;
+            I_addr    : in  std_logic_vector(FB_ADDR_BITS-1 downto 0);
             I_wdata   : in  word_t;
             I_be      : in  std_logic_vector(3 downto 0);
             O_rdata   : out word_t;
@@ -175,10 +178,46 @@ architecture Behavioral of soc is
     signal we_ram  : std_logic;
     signal we_fb   : std_logic;
 
+    -- =========================================================================
+    -- CONVERSION BYTE->WORD CENTRALIZADA
+    --
+    -- La CPU emite direcciones DE BYTE (estandar RISC-V): incrementar
+    -- por 4 = la siguiente palabra. Las BRAMs son WORD-ADDRESSABLE:
+    -- incrementar por 1 = la siguiente palabra.
+    --
+    -- Conversion: descartar los 2 bits bajos (offset de byte dentro de
+    -- la palabra) y tomar los siguientes log2(N) bits como indice de
+    -- palabra.
+    --
+    --   byte addr [31..0] -> bits [ADDR+1 .. 2] = indice de palabra
+    --
+    -- Para main_memory (ADDR_BITS=13, 8192 palabras = 32 KiB):
+    --   word index = byte_addr[14:2]
+    -- Para vga_framebuffer (FB_ADDR_BITS=13, 8192 palabras):
+    --   word index = byte_addr[14:2]
+    --
+    -- Hacer esta conversion UNA SOLA VEZ aqui, y pasar el word index a
+    -- las memorias, evita el bug en el que el byte_addr se interpreta
+    -- directamente como word_addr (saltos de 4 en la BRAM fisica que
+    -- crean los huecos visibles como "columnas" en el framebuffer).
+    -- =========================================================================
+    constant MAIN_ADDR_BITS : integer := 13;
+    constant FB_ADDR_BITS   : integer := 13;
+
+    signal imem_word_addr : std_logic_vector(MAIN_ADDR_BITS-1 downto 0);
+    signal dmem_word_addr_main : std_logic_vector(MAIN_ADDR_BITS-1 downto 0);
+    signal dmem_word_addr_fb   : std_logic_vector(FB_ADDR_BITS-1 downto 0);
+
     -- dbg_pc esta disponible por puerto del cpu_core pero no se enruta a
     -- pin fisico. Se deja como OPEN.
 
 begin
+
+    -- Conversion byte -> word: descarta bits [1:0] (offset de byte) y
+    -- toma los siguientes ADDR_BITS bits como indice de palabra.
+    imem_word_addr     <= imem_addr(MAIN_ADDR_BITS + 1 downto 2);
+    dmem_word_addr_main <= dmem_addr(MAIN_ADDR_BITS + 1 downto 2);
+    dmem_word_addr_fb   <= dmem_addr(FB_ADDR_BITS   + 1 downto 2);
 
     reset <= not I_reset_n;
 
@@ -232,14 +271,15 @@ begin
     ---------------------------------------------------------------------------
     ram_inst : main_memory
         generic map (
-            ADDR_BITS => 13,
+            ADDR_BITS => MAIN_ADDR_BITS,
             INIT_FILE => "program.mif"
         )
         port map (
             I_clk     => I_clk_50,
-            I_addr_a  => imem_addr,
+            -- Direcciones WORD-aligned, ya truncadas arriba
+            I_addr_a  => imem_word_addr,
             O_data_a  => imem_data,
-            I_addr_b  => dmem_addr,
+            I_addr_b  => dmem_word_addr_main,
             I_we_b    => we_ram,
             I_be_b    => dmem_be,
             I_wdata_b => dmem_wdata,
@@ -249,23 +289,28 @@ begin
     ---------------------------------------------------------------------------
     -- Framebuffer VGA
     ---------------------------------------------------------------------------
-    fb_inst : vga_framebuffer port map (
-        I_clk_50    => I_clk_50,
-        I_reset     => reset,
-        I_we        => we_fb,
-        I_addr      => dmem_addr,
-        I_wdata     => dmem_wdata,
-        I_be        => dmem_be,
-        O_rdata     => fb_rdata,
-        I_pal_we    => pal_we,
-        I_pal_index => pal_index,
-        I_pal_data  => pal_data,
-        O_hs        => O_vga_hs,
-        O_vs        => O_vga_vs,
-        O_r         => O_vga_r,
-        O_g         => O_vga_g,
-        O_b         => O_vga_b
-    );
+    fb_inst : vga_framebuffer
+        generic map (
+            FB_ADDR_BITS => FB_ADDR_BITS
+        )
+        port map (
+            I_clk_50    => I_clk_50,
+            I_reset     => reset,
+            I_we        => we_fb,
+            -- Direccion WORD-aligned, ya truncada arriba
+            I_addr      => dmem_word_addr_fb,
+            I_wdata     => dmem_wdata,
+            I_be        => dmem_be,
+            O_rdata     => fb_rdata,
+            I_pal_we    => pal_we,
+            I_pal_index => pal_index,
+            I_pal_data  => pal_data,
+            O_hs        => O_vga_hs,
+            O_vs        => O_vga_vs,
+            O_r         => O_vga_r,
+            O_g         => O_vga_g,
+            O_b         => O_vga_b
+        );
 
     ---------------------------------------------------------------------------
     -- Periferia MMIO

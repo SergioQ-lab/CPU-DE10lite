@@ -2,11 +2,12 @@
 -- vga_framebuffer.vhd
 --
 -- Controlador VGA con framebuffer indexado por paleta de 16 colores.
--- Usa altsyncram en modo DUAL_PORT (Simple Dual Port) para garantizar
+-- Usa altsyncram en modo BIDIR_DUAL_PORT (True Dual Port) para garantizar
 -- que Quartus mete el framebuffer en BRAM M9K y no en flip-flops.
 --
---   Puerto A: lectura (barrido VGA, sin write enable)
---   Puerto B: escritura con byte enable (escrituras desde la CPU)
+--   Puerto A: lectura (barrido VGA, wren_a fijo a '0')
+--   Puerto B: lectura + escritura con byte enable (acceso de la CPU,
+--             permite read-modify-write para putpixel sub-word)
 --
 -- Resolucion nativa: 320 x 200 (Doom). Cada pixel = nibble de 4 bits
 -- indice a la paleta. 8 pixeles por palabra de 32 bits => 8000 palabras
@@ -15,9 +16,9 @@
 -- Salida fisica: 640 x 480. El framebuffer se duplica 2x en H y V
 -- ocupando 640x400, con 40 px de banda negra arriba y abajo.
 --
--- La CPU no puede LEER del framebuffer (no es necesario para Doom y
--- simplifica el BRAM a Simple Dual Port). El bus de datos del SoC
--- recibe 0 cuando se intenta leer FB.
+-- IMPORTANTE: el puerto B (CPU) recibe DIRECCION DE PALABRA, NO de byte.
+-- La conversion byte->word (descartar los 2 LSBs) se hace EXPLICITAMENTE
+-- en soc.vhd. Asi este modulo no puede meter la pata con el alineado.
 --------------------------------------------------------------------------------
 library IEEE;
 use IEEE.STD_LOGIC_1164.all;
@@ -30,12 +31,16 @@ library work;
 use work.riscv_pkg.all;
 
 entity vga_framebuffer is
+    generic (
+        FB_ADDR_BITS : integer := 13   -- 2^13 = 8192 palabras de FB
+    );
     port (
         I_clk_50  : in  std_logic;
         I_reset   : in  std_logic;
-        -- Bus de escritura desde la CPU (32 bits + BE de 4)
+        -- Bus de lectura/escritura desde la CPU (32 bits + BE de 4).
+        -- I_addr es DIRECCION DE PALABRA (FB_ADDR_BITS bits), NO byte.
         I_we      : in  std_logic;
-        I_addr    : in  word_t;
+        I_addr    : in  std_logic_vector(FB_ADDR_BITS-1 downto 0);
         I_wdata   : in  word_t;
         I_be      : in  std_logic_vector(3 downto 0);
         O_rdata   : out word_t;
@@ -69,7 +74,7 @@ architecture Behavioral of vga_framebuffer is
         );
     end component;
 
-    constant FB_ADDR_BITS : integer := 13;
+    -- FB_ADDR_BITS viene ahora del generic
     constant FB_WORDS     : integer := 2**FB_ADDR_BITS;
     constant FB_W         : integer := 320;
     constant FB_H         : integer := 200;
@@ -105,8 +110,13 @@ architecture Behavioral of vga_framebuffer is
     signal pixel_nibble  : std_logic_vector(3 downto 0);
     signal pixel_color   : std_logic_vector(11 downto 0);
 
-    -- Para el puerto B (CPU writes)
+    -- Para el puerto B (CPU read/write)
     signal wr_word_addr  : std_logic_vector(FB_ADDR_BITS-1 downto 0);
+    signal fb_q_b        : std_logic_vector(31 downto 0);
+    -- Byte enable forzado a "1111" durante lecturas para que altsyncram
+    -- devuelva la palabra completa (algunas versiones aplican byteena
+    -- tambien en lecturas; con "1111" siempre devuelve todo).
+    signal fb_byteena    : std_logic_vector(3 downto 0);
     constant ZERO_WORD : std_logic_vector(31 downto 0) := (others => '0');
 
 begin
@@ -166,14 +176,19 @@ begin
 
     ---------------------------------------------------------------------------
     -- BRAM dual-port (lectura/escritura) via altsyncram
+    --
+    -- I_addr ya es DIRECCION DE PALABRA (truncada en soc.vhd). Aqui se
+    -- conecta directamente al puerto B del altsyncram sin mas slicing.
     ---------------------------------------------------------------------------
-    wr_word_addr <= I_addr(FB_ADDR_BITS+1 downto 2);
+    wr_word_addr <= I_addr;
+
+    -- Forzar byte enable a "1111" durante lecturas
+    fb_byteena <= I_be when I_we = '1' else "1111";
 
     fb_ram : altsyncram
         generic map (
-            -- Misma config que main_memory para garantizar inferencia
-            -- M9K. El puerto A se ata a wren='0' para que sea de solo
-            -- lectura (lo usa la VGA).
+            -- BIDIR_DUAL_PORT: puerto A para barrido VGA (solo lee),
+            -- puerto B para la CPU (lee y escribe con byte enable).
             operation_mode             => "BIDIR_DUAL_PORT",
             width_a                    => 32,
             widthad_a                  => FB_ADDR_BITS,
@@ -204,14 +219,15 @@ begin
             -- Puerto A: lectura para barrido VGA. wren='0' siempre.
             address_a => rd_word_addr,
             wren_a    => '0',
-            byteena_a => "0000",
+            byteena_a => "1111",
             data_a    => ZERO_WORD,
             q_a       => fb_word_read,
-            -- Puerto B: escritura desde CPU con byte enable. q_b se ignora.
+            -- Puerto B: lectura + escritura desde CPU.
             address_b => wr_word_addr,
             wren_b    => I_we,
-            byteena_b => I_be,
-            data_b    => I_wdata
+            byteena_b => fb_byteena,
+            data_b    => I_wdata,
+            q_b       => fb_q_b
         );
 
     -- Selector de nibble
@@ -228,10 +244,9 @@ begin
     pixel_color <= palette(to_integer(unsigned(pixel_nibble))) when in_active = '1'
                    else X"000";
 
-    -- La CPU no lee el framebuffer (devolvemos 0 para que la salida tenga
-    -- un valor definido en el mux del SoC). Si Doom necesitara doble buffer
-    -- habria que ampliar el altsyncram a BIDIR_DUAL_PORT.
-    O_rdata <= ZERO_WORD;
+    -- Salida de lectura para la CPU (read-back del framebuffer).
+    -- Permite que putpixel en C use read-modify-write sobre la palabra.
+    O_rdata <= fb_q_b;
 
     ---------------------------------------------------------------------------
     -- Escritura de paleta
