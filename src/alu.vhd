@@ -155,31 +155,24 @@ begin
     end process;
 
     ---------------------------------------------------------------------------
-    -- Control de start/done de las unidades multi-ciclo. Cuando el pipeline
-    -- presenta una instruccion MUL/DIV valida levantamos el strobe; al ver
-    -- O_done lo retiramos para que la unidad vuelva a IDLE.
+    -- Control de start de las unidades multi-ciclo: COMBINACIONAL.
+    --
+    -- BUG anterior: usar un proceso clocked introducia 1 ciclo de retraso
+    -- entre detectar la instruccion mul/div y arrancar la unidad. En ese
+    -- ciclo extra, el pipeline drenaba ex_mem/mem_wb a NOP (por el stall
+    -- multi-ciclo) y el forwarding caia a id_ex.rs2d, que tiene un valor
+    -- viejo del regfile (anterior al productor). Resultado: el divisor
+    -- latchaba operandos incorrectos (p.ej. b=0 en lugar de 32).
+    --
+    -- Solucion: asertar start combinacionalmente cuando la instr es valida,
+    -- es mul/div y la unidad aun no ha terminado. Asi la unidad latcha
+    -- I_a/I_b en EL MISMO ciclo en que la instr entra en EX, ANTES de que
+    -- el forwarding drene.
     ---------------------------------------------------------------------------
-    proc_long_ops : process (I_clk)
-    begin
-        if rising_edge(I_clk) then
-            if I_reset = '1' then
-                s_mul_start <= '0';
-                s_div_start <= '0';
-            else
-                if I_valid = '1' and s_is_mul = '1' and s_mul_done = '0' then
-                    s_mul_start <= '1';
-                elsif s_mul_done = '1' then
-                    s_mul_start <= '0';
-                end if;
-
-                if I_valid = '1' and s_is_div = '1' and s_div_done = '0' then
-                    s_div_start <= '1';
-                elsif s_div_done = '1' then
-                    s_div_start <= '0';
-                end if;
-            end if;
-        end if;
-    end process;
+    s_mul_start <= '1' when (I_valid = '1' and s_is_mul = '1' and s_mul_done = '0')
+                   else '0';
+    s_div_start <= '1' when (I_valid = '1' and s_is_div = '1' and s_div_done = '0')
+                   else '0';
 
     -- Mux de salida
     O_result <= s_mul_result when s_is_mul = '1' else
