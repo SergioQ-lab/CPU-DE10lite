@@ -1,0 +1,105 @@
+# =====================================================================
+# .gitignore para proyecto Intel Quartus Prime (VHDL) + MAX10 / DE10-Lite
+#
+# Mantenemos:
+#   - Fuentes HDL (src/*.vhd, *.v, *.sv)
+#   - Proyecto Quartus (*.qpf, *.qsf, *.sdc)
+#   - Memorias de inicializacion (*.mif, *.hex)
+#   - Documentacion (README*, doc/)
+#
+# Ignoramos los artefactos de compilacion porque se regeneran y pesan
+# mucho (cientos de MB), y los ficheros de workspace que son personales.
+# =====================================================================
+
+# ---- Quartus: bases de datos intermedias del fitter / analysis ----
+db/
+incremental_db/
+greybox_tmp/
+hc_output/
+qdb/
+hps_isw_handoff/
+
+# ---- Quartus: salidas generadas (programmer files, reports, etc.) ----
+output_files/
+simulation/
+verification/
+
+# ---- Quartus: ficheros de workspace y backups personales ----
+*.qws
+*.qpf.bak
+*.qsf.bak
+*.sdc.bak
+*.bak
+*~
+
+# ---- Quartus: reports, mensajes y logs ----
+*.rpt
+*.summary
+*.smsg
+*.qmsg
+*.pin
+*.done
+*.txt.bak
+
+# ---- Quartus: bitstream y ficheros de programacion ----
+# (los excluimos porque se regeneran al compilar; quitalos si quieres
+#  publicar binarios listos para programar)
+*.sof
+*.pof
+*.jic
+*.jdi
+*.cdf
+*.cof
+
+# ---- Quartus: archivos temporales y caches ----
+*.qar
+*.qarlog
+*.dpf
+*.cdb
+*.hps
+*.smr
+*.svf
+PLLJ_PLLSPE_INFO.txt
+c5_pin_model_dump.txt
+
+# ---- Modelsim / Questa (simulacion) ----
+work/
+transcript
+vsim.wlf
+*.vstf
+*.mti
+modelsim.ini
+*.do.bak
+
+# ---- VHDL / Verilog: ficheros intermedios de varios simuladores ----
+*.vhdp
+*.svp
+*.h.orig
+*.vhd.orig
+
+# ---- Editores / IDE ----
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.history/
+
+# ---- Sistema operativo ----
+.DS_Store
+Thumbs.db
+desktop.ini
+$RECYCLE.BIN/
+ehthumbs.db
+
+# ---- Otros artefactos ----
+*.log
+*.tmp
+*.orig
+*.swp
+
+# =====================================================================
+# Nota: si en algun momento quieres compartir el .sof compilado para
+# que otros lo programen sin tener Quartus, comenta la linea "*.sof"
+# o sube el .sof manualmente con: git add -f output_files/CPU-RISC-V.sof
+# =====================================================================

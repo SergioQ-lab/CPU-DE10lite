@@ -1,0 +1,52 @@
+-- =====================================================================
+-- program.mif - Rayas diagonales de los 16 colores de la paleta
+--
+-- Cada word del framebuffer se rellena con un nibble repetido 8 veces.
+-- El nibble (color) es el indice del word mod 16. Asi consecutivos
+-- words tienen colores 0,1,2,...,15,0,1,...
+--
+-- Como hay 40 words por fila y los colores ciclan cada 16, cada nueva
+-- fila se desplaza 8 pixeles -> aparecen diagonales a 45 grados.
+-- =====================================================================
+WIDTH = 32;
+DEPTH = 8192;
+
+ADDRESS_RADIX = HEX;
+DATA_RADIX = HEX;
+
+CONTENT
+BEGIN
+    [0000..1FFF] : 00000013;
+
+    -- LEDs indicador de "fill iniciado"
+    0000 : F0000537;  -- lui  x10, 0xF0000
+    0001 : 05500593;  -- addi x11, x0, 0x55
+    0002 : 00B52023;  -- sw   x11, 0(x10)
+
+    -- Setup framebuffer
+    0003 : 100000B7;  -- lui  x1, 0x10000      (FB base)
+    0004 : 000081B7;  -- lui  x3, 0x8
+    0005 : D0018193;  -- addi x3, x3, -768     (x3 = 32000)
+    0006 : 00308233;  -- add  x4, x1, x3       (x4 = FB end)
+    0007 : 00000293;  -- addi x5, x0, 0        (x5 = word index)
+
+    -- fill_loop: word(i) = nibble (i mod 16) repetido x8
+    0008 : 00F2F313;  -- andi x6, x5, 0xF      (color = i mod 16)
+    0009 : 00431393;  -- slli x7, x6, 4
+    000A : 0063E3B3;  -- or   x7, x7, x6       (nibble x2 = 8 bits)
+    000B : 00839413;  -- slli x8, x7, 8
+    000C : 00746433;  -- or   x8, x8, x7       (16 bits)
+    000D : 01041493;  -- slli x9, x8, 16
+    000E : 0084E4B3;  -- or   x9, x9, x8       (32 bits, 8 nibbles iguales)
+    000F : 0090A023;  -- sw   x9, 0(x1)
+    0010 : 00408093;  -- addi x1, x1, 4
+    0011 : 00128293;  -- addi x5, x5, 1
+    0012 : FC409CE3;  -- bne  x1, x4, -40      (vuelve al andi)
+
+    -- LEDs indicador de "fill completo"
+    0013 : 0AA00593;  -- addi x11, x0, 0xAA
+    0014 : 00B52023;  -- sw   x11, 0(x10)
+
+    -- Bucle infinito
+    0015 : 0000006F;  -- jal  x0, 0
+END;
