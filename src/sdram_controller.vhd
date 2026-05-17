@@ -287,11 +287,13 @@ begin
                         -- La columna son los 10 bits bajos. Ponemos A10=1 para Auto-Precharge
                         addr_reg(9 downto 0) <= saved_addr(9 downto 0);
                         addr_reg(10) <= '1'; -- Auto-Precharge!
-                        
-                        -- Filtros de bytes invertidos (0 activa, 1 oculta)
-                        dqm_reg(1) <= not saved_byte(1);
-                        dqm_reg(0) <= not saved_byte(0);
-                        
+
+                        -- DQM en lecturas controla el OUTPUT ENABLE de la SDRAM,
+                        -- no la mascara de bytes. Si lo ponemos a '1' la SDRAM
+                        -- deja DQ en alta impedancia y leeriamos 0xFFFF. Para
+                        -- READ siempre 00: la CPU ya extrae el byte/half en WB.
+                        dqm_reg <= "00";
+
                         state <= S_CAS1;
 
                     when S_CAS1 =>
