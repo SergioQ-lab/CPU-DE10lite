@@ -92,6 +92,8 @@ architecture Behavioral of sdram_controller is
         S_READ_CMD,
         S_CAS1,
         S_CAS2,
+        S_CAS3,
+        S_READ_DATA,
         S_WRITE_CMD,
         S_TWR1,
         S_TWR2,
@@ -273,18 +275,26 @@ begin
                         state <= S_CAS1;
 
                     when S_CAS1 =>
-                        -- Primer ciclo de CAS Latency
+                        -- Primer ciclo de espera CAS
                         state <= S_CAS2;
 
                     when S_CAS2 =>
-                        -- Segundo ciclo: los datos estan disponibles en los pines IO_sdram_dq
+                        -- Segundo ciclo de espera CAS
+                        state <= S_CAS3;
+
+                    when S_CAS3 =>
+                        -- Tercer ciclo: despues del flanco de bajada de este ciclo,
+                        -- la SDRAM expone los datos validos en IO_sdram_dq.
+                        state <= S_READ_DATA;
+
+                    when S_READ_DATA =>
+                        -- Los datos ya son estables en el bus fisico. Los registramos.
                         O_data_out <= IO_sdram_dq;
                         O_valid    <= '1';
                         
-                        -- Como hemos pedido Auto-Precharge, la RAM se esta cerrando.
-                        -- Debemos esperar tRP (1 ciclo extra de margen) antes del siguiente ACTIVATE.
-                        wait_timer <= 0;
-                        state      <= S_PRECHARGE_WAIT;
+                        -- Como usamos Auto-Precharge, la fila ya se esta cerrando.
+                        -- Podemos volver a IDLE (el tRP ya ha transcurrido desde el precharge interno).
+                        state      <= S_IDLE;
 
                     when S_WRITE_CMD =>
                         cmd_reg <= CMD_WRITE;
