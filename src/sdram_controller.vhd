@@ -92,6 +92,7 @@ architecture Behavioral of sdram_controller is
         S_READ_CMD,
         S_CAS1,
         S_CAS2,
+        S_CAS3,
         S_WRITE_CMD,
         S_TWR1,
         S_TWR2,
