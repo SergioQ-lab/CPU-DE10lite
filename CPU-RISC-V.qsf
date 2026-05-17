@@ -30,6 +30,7 @@ set_global_assignment -name SMART_RECOMPILE OFF
 
 # ---- Lista de ficheros fuente ----
 set_global_assignment -name VHDL_FILE src/riscv_pkg.vhd
+set_global_assignment -name VHDL_FILE src/sdram_controller.vhd
 set_global_assignment -name VHDL_FILE src/register_file.vhd
 set_global_assignment -name VHDL_FILE src/decoder.vhd
 set_global_assignment -name VHDL_FILE src/multiplier.vhd
@@ -194,6 +195,56 @@ set_instance_assignment -name WEAK_PULL_UP_RESISTOR ON -to JOYSTICK[*]
 
 # Restricciones de reloj y timing (en fichero SDC aparte)
 set_global_assignment -name SDC_FILE "CPU-RISC-V.sdc"
+
+# ==============================================================================
+# SDRAM (IS42S16320D-7TL)
+# ==============================================================================
+# DRAM Address
+set_location_assignment PIN_U17 -to DRAM_ADDR[0]
+set_location_assignment PIN_W19 -to DRAM_ADDR[1]
+set_location_assignment PIN_V18 -to DRAM_ADDR[2]
+set_location_assignment PIN_U18 -to DRAM_ADDR[3]
+set_location_assignment PIN_U19 -to DRAM_ADDR[4]
+set_location_assignment PIN_T18 -to DRAM_ADDR[5]
+set_location_assignment PIN_T19 -to DRAM_ADDR[6]
+set_location_assignment PIN_R18 -to DRAM_ADDR[7]
+set_location_assignment PIN_P18 -to DRAM_ADDR[8]
+set_location_assignment PIN_P19 -to DRAM_ADDR[9]
+set_location_assignment PIN_T20 -to DRAM_ADDR[10]
+set_location_assignment PIN_P20 -to DRAM_ADDR[11]
+set_location_assignment PIN_R20 -to DRAM_ADDR[12]
+
+# DRAM Data
+set_location_assignment PIN_Y21 -to DRAM_DQ[0]
+set_location_assignment PIN_Y20 -to DRAM_DQ[1]
+set_location_assignment PIN_AA22 -to DRAM_DQ[2]
+set_location_assignment PIN_AA21 -to DRAM_DQ[3]
+set_location_assignment PIN_Y22 -to DRAM_DQ[4]
+set_location_assignment PIN_W22 -to DRAM_DQ[5]
+set_location_assignment PIN_W20 -to DRAM_DQ[6]
+set_location_assignment PIN_V21 -to DRAM_DQ[7]
+set_location_assignment PIN_P21 -to DRAM_DQ[8]
+set_location_assignment PIN_J22 -to DRAM_DQ[9]
+set_location_assignment PIN_H21 -to DRAM_DQ[10]
+set_location_assignment PIN_H22 -to DRAM_DQ[11]
+set_location_assignment PIN_G22 -to DRAM_DQ[12]
+set_location_assignment PIN_G20 -to DRAM_DQ[13]
+set_location_assignment PIN_G19 -to DRAM_DQ[14]
+set_location_assignment PIN_F22 -to DRAM_DQ[15]
+
+# DRAM Control
+set_location_assignment PIN_T21 -to DRAM_BA[0]
+set_location_assignment PIN_T22 -to DRAM_BA[1]
+set_location_assignment PIN_U21 -to DRAM_CAS_N
+set_location_assignment PIN_N22 -to DRAM_CKE
+set_location_assignment PIN_L14 -to DRAM_CLK
+set_location_assignment PIN_U20 -to DRAM_CS_N
+set_location_assignment PIN_V22 -to DRAM_LDQM
+set_location_assignment PIN_U22 -to DRAM_RAS_N
+set_location_assignment PIN_J21 -to DRAM_UDQM
+set_location_assignment PIN_V20 -to DRAM_WE_N
+
+set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to DRAM_*
 
 set_global_assignment -name LAST_QUARTUS_VERSION "17.1.0 Lite Edition"
 set_global_assignment -name PARTITION_NETLIST_TYPE SOURCE -section_id Top

@@ -32,7 +32,20 @@ entity top_de10_lite is
         VGA_G         : out std_logic_vector(3 downto 0);
         VGA_B         : out std_logic_vector(3 downto 0);
         UART_TX       : out std_logic;
-        JOYSTICK      : in  std_logic_vector(6 downto 0)
+        JOYSTICK      : in  std_logic_vector(6 downto 0);
+        
+        -- SDRAM
+        DRAM_ADDR     : out   std_logic_vector(12 downto 0);
+        DRAM_BA       : out   std_logic_vector(1 downto 0);
+        DRAM_CAS_N    : out   std_logic;
+        DRAM_CKE      : out   std_logic;
+        DRAM_CLK      : out   std_logic;
+        DRAM_CS_N     : out   std_logic;
+        DRAM_DQ       : inout std_logic_vector(15 downto 0);
+        DRAM_LDQM     : out   std_logic;
+        DRAM_RAS_N    : out   std_logic;
+        DRAM_UDQM     : out   std_logic;
+        DRAM_WE_N     : out   std_logic
     );
 end entity top_de10_lite;
 
@@ -58,6 +71,33 @@ architecture Behavioral of top_de10_lite is
             O_vga_b   : out std_logic_vector(3 downto 0);
             O_uart_tx : out std_logic;
             I_joystick: in  std_logic_vector(6 downto 0)
+        );
+    end component;
+
+    component sdram_controller is
+        port (
+            I_clk        : in    std_logic;
+            I_reset      : in    std_logic;
+            I_addr       : in    std_logic_vector(24 downto 0);
+            I_data_in    : in    std_logic_vector(15 downto 0);
+            O_data_out   : out   std_logic_vector(15 downto 0);
+            I_rd_en      : in    std_logic;
+            I_wr_en      : in    std_logic;
+            I_byte_en    : in    std_logic_vector(1 downto 0);
+            O_busy       : out   std_logic;
+            O_valid      : out   std_logic;
+            
+            O_sdram_clk  : out   std_logic;
+            O_sdram_cke  : out   std_logic;
+            O_sdram_cs_n : out   std_logic;
+            O_sdram_ras_n: out   std_logic;
+            O_sdram_cas_n: out   std_logic;
+            O_sdram_we_n : out   std_logic;
+            O_sdram_addr : out   std_logic_vector(12 downto 0);
+            O_sdram_ba   : out   std_logic_vector(1 downto 0);
+            O_sdram_ldqm : out   std_logic;
+            O_sdram_udqm : out   std_logic;
+            IO_sdram_dq  : inout std_logic_vector(15 downto 0)
         );
     end component;
 
@@ -96,6 +136,31 @@ begin
         O_vga_b   => VGA_B,
         O_uart_tx => UART_TX,
         I_joystick=> JOYSTICK
+    );
+
+    sdram_inst : sdram_controller port map (
+        I_clk        => MAX10_CLK1_50,
+        I_reset      => not reset_n,
+        I_addr       => (others => '0'),
+        I_data_in    => (others => '0'),
+        O_data_out   => open,
+        I_rd_en      => '0',
+        I_wr_en      => '0',
+        I_byte_en    => "00",
+        O_busy       => open,
+        O_valid      => open,
+        
+        O_sdram_clk  => DRAM_CLK,
+        O_sdram_cke  => DRAM_CKE,
+        O_sdram_cs_n => DRAM_CS_N,
+        O_sdram_ras_n=> DRAM_RAS_N,
+        O_sdram_cas_n=> DRAM_CAS_N,
+        O_sdram_we_n => DRAM_WE_N,
+        O_sdram_addr => DRAM_ADDR,
+        O_sdram_ba   => DRAM_BA,
+        O_sdram_ldqm => DRAM_LDQM,
+        O_sdram_udqm => DRAM_UDQM,
+        IO_sdram_dq  => DRAM_DQ
     );
 
 end architecture Behavioral;
