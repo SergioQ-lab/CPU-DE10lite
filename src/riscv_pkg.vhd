@@ -194,6 +194,7 @@ package riscv_pkg is
     ---------------------------------------------------------------------------
     constant MAINMEM_BASE : word_t := X"00000000";
     constant FB_BASE      : word_t := X"10000000";
+    constant SDRAM_BASE   : word_t := X"20000000";
     constant MMIO_BASE    : word_t := X"F0000000";
 
     -- Offsets dentro de la region MMIO

@@ -70,22 +70,7 @@ architecture Behavioral of top_de10_lite is
             O_vga_g   : out std_logic_vector(3 downto 0);
             O_vga_b   : out std_logic_vector(3 downto 0);
             O_uart_tx : out std_logic;
-            I_joystick: in  std_logic_vector(6 downto 0)
-        );
-    end component;
-
-    component sdram_controller is
-        port (
-            I_clk        : in    std_logic;
-            I_reset      : in    std_logic;
-            I_addr       : in    std_logic_vector(24 downto 0);
-            I_data_in    : in    std_logic_vector(15 downto 0);
-            O_data_out   : out   std_logic_vector(15 downto 0);
-            I_rd_en      : in    std_logic;
-            I_wr_en      : in    std_logic;
-            I_byte_en    : in    std_logic_vector(1 downto 0);
-            O_busy       : out   std_logic;
-            O_valid      : out   std_logic;
+            I_joystick: in  std_logic_vector(6 downto 0);
             
             O_sdram_clk  : out   std_logic;
             O_sdram_cke  : out   std_logic;
@@ -135,20 +120,7 @@ begin
         O_vga_g   => VGA_G,
         O_vga_b   => VGA_B,
         O_uart_tx => UART_TX,
-        I_joystick=> JOYSTICK
-    );
-
-    sdram_inst : sdram_controller port map (
-        I_clk        => MAX10_CLK1_50,
-        I_reset      => not reset_n,
-        I_addr       => (others => '0'),
-        I_data_in    => (others => '0'),
-        O_data_out   => open,
-        I_rd_en      => '0',
-        I_wr_en      => '0',
-        I_byte_en    => "00",
-        O_busy       => open,
-        O_valid      => open,
+        I_joystick=> JOYSTICK,
         
         O_sdram_clk  => DRAM_CLK,
         O_sdram_cke  => DRAM_CKE,

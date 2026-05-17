@@ -54,8 +54,8 @@ entity hazard_unit is
         I_wb_rd     : in  std_logic_vector(4 downto 0);
         I_wb_reg_we : in  std_logic;
 
-        -- Estado de unidades multiciclo y de saltos
         I_alu_busy    : in std_logic;
+        I_dmem_busy   : in std_logic;
         I_branch_take : in std_logic;
         I_trap        : in std_logic;
 
@@ -66,6 +66,8 @@ entity hazard_unit is
         O_stall_pc    : out std_logic;
         O_stall_if_id : out std_logic;
         O_stall_id_ex : out std_logic;
+        O_stall_ex_mem: out std_logic;
+        O_stall_mem_wb: out std_logic;
         O_bubble_id_ex: out std_logic;
         O_bubble_ex_mem: out std_logic;
         O_flush_if    : out std_logic;
@@ -106,11 +108,17 @@ begin
     s_load_use <= '1' when (I_ex_mem_re = '1' and I_ex_rd /= "00000" and
                               (I_ex_rd = I_id_rs1 or I_ex_rd = I_id_rs2)) else '0';
 
-    O_stall_pc     <= s_load_use or I_alu_busy;
-    O_stall_if_id  <= s_load_use or I_alu_busy;
-    O_stall_id_ex  <= I_alu_busy;        -- solo en multiciclo
-    O_bubble_id_ex <= s_load_use;        -- bubble en load-use
-    O_bubble_ex_mem <= I_alu_busy;       -- bubble downstream en multiciclo
+    ---------------------------------------------------------------------------
+    -- Control de paradas (STALL) y burbujas (BUBBLE)
+    ---------------------------------------------------------------------------
+    O_stall_pc    <= I_alu_busy or s_load_use or I_dmem_busy;
+    O_stall_if_id <= I_alu_busy or s_load_use or I_dmem_busy;
+    O_stall_id_ex <= I_alu_busy or I_dmem_busy;
+    O_stall_ex_mem<= I_dmem_busy;
+    O_stall_mem_wb<= I_dmem_busy;
+
+    O_bubble_id_ex  <= s_load_use and (not I_alu_busy) and (not I_dmem_busy);
+    O_bubble_ex_mem <= I_alu_busy and (not I_dmem_busy);
     O_flush_if <= I_branch_take or I_trap;
     O_flush_id <= I_branch_take or I_trap;
 

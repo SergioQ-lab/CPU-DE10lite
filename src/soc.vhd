@@ -55,7 +55,20 @@ entity soc is
         O_uart_tx : out std_logic;
 
         -- Joystick
-        I_joystick: in  std_logic_vector(6 downto 0)
+        I_joystick: in  std_logic_vector(6 downto 0);
+
+        -- SDRAM
+        O_sdram_clk  : out   std_logic;
+        O_sdram_cke  : out   std_logic;
+        O_sdram_cs_n : out   std_logic;
+        O_sdram_ras_n: out   std_logic;
+        O_sdram_cas_n: out   std_logic;
+        O_sdram_we_n : out   std_logic;
+        O_sdram_addr : out   std_logic_vector(12 downto 0);
+        O_sdram_ba   : out   std_logic_vector(1 downto 0);
+        O_sdram_ldqm : out   std_logic;
+        O_sdram_udqm : out   std_logic;
+        IO_sdram_dq  : inout std_logic_vector(15 downto 0)
     );
 end entity soc;
 
@@ -72,6 +85,7 @@ architecture Behavioral of soc is
             O_dmem_we    : out std_logic;
             O_dmem_be    : out std_logic_vector(3 downto 0);
             I_dmem_rdata : in  word_t;
+            I_dmem_busy  : in  std_logic;
             I_irq        : in  std_logic;
             O_dbg_pc     : out word_t
         );
@@ -144,6 +158,33 @@ architecture Behavioral of soc is
         );
     end component;
 
+    component sdram_controller is
+        port (
+            I_clk        : in    std_logic;
+            I_reset      : in    std_logic;
+            I_addr       : in    std_logic_vector(24 downto 0);
+            I_data_in    : in    std_logic_vector(15 downto 0);
+            O_data_out   : out   std_logic_vector(15 downto 0);
+            I_rd_en      : in    std_logic;
+            I_wr_en      : in    std_logic;
+            I_byte_en    : in    std_logic_vector(1 downto 0);
+            O_busy       : out   std_logic;
+            O_valid      : out   std_logic;
+            
+            O_sdram_clk  : out   std_logic;
+            O_sdram_cke  : out   std_logic;
+            O_sdram_cs_n : out   std_logic;
+            O_sdram_ras_n: out   std_logic;
+            O_sdram_cas_n: out   std_logic;
+            O_sdram_we_n : out   std_logic;
+            O_sdram_addr : out   std_logic_vector(12 downto 0);
+            O_sdram_ba   : out   std_logic_vector(1 downto 0);
+            O_sdram_ldqm : out   std_logic;
+            O_sdram_udqm : out   std_logic;
+            IO_sdram_dq  : inout std_logic_vector(15 downto 0)
+        );
+    end component;
+
     -- Senales del bus
     signal reset       : std_logic;
 
@@ -172,6 +213,15 @@ architecture Behavioral of soc is
     signal ram_rdata  : word_t;
     signal fb_rdata   : word_t;
     signal mmio_rdata : word_t;
+    signal sdram_rdata: word_t;
+
+    -- Senales para SDRAM
+    signal sel_sdram  : std_logic;
+    signal we_sdram   : std_logic;
+    signal sdram_busy : std_logic;
+    signal sdram_valid: std_logic;
+    signal sdram_rd_en: std_logic;
+    signal sdram_out16: std_logic_vector(15 downto 0);
 
     -- Senales de paleta del bridge MMIO al framebuffer
     signal pal_we    : std_logic;
@@ -228,13 +278,19 @@ begin
     ---------------------------------------------------------------------------
     -- Decode de direccion del bus de datos
     ---------------------------------------------------------------------------
-    sel_ram  <= '1' when dmem_addr(31 downto 16) = X"0000" else '0';
-    sel_fb   <= '1' when dmem_addr(31 downto 28) = X"1"    else '0';
-    sel_mmio <= '1' when dmem_addr(31 downto 28) = X"F"    else '0';
+    -- 1. Address Decoding
+    -- =========================================================================
+    sel_ram   <= '1' when (dmem_addr(31 downto 28) = MAINMEM_BASE(31 downto 28)) else '0';
+    sel_fb    <= '1' when (dmem_addr(31 downto 28) = FB_BASE(31 downto 28))      else '0';
+    sel_sdram <= '1' when (dmem_addr(31 downto 28) = SDRAM_BASE(31 downto 28))   else '0';
+    sel_mmio  <= '1' when (dmem_addr(31 downto 28) = MMIO_BASE(31 downto 28))    else '0';
 
-    -- Write enables enmascarados por la zona seleccionada
-    we_ram <= dmem_we and sel_ram;
-    we_fb  <= dmem_we and sel_fb;
+    -- 2. Write Enables locales (se activan solo si we=1 y estamos en esa zona)
+    -- =========================================================================
+    we_ram    <= sel_ram   and dmem_we;
+    we_fb     <= sel_fb    and dmem_we;
+    we_sdram  <= sel_sdram and dmem_we;
+    sdram_rd_en <= sel_sdram and (not dmem_we);
 
     -- Retraso de 1 ciclo para la fase de lectura
     sel_delay : process (I_clk_50)
@@ -245,9 +301,12 @@ begin
                 sel_fb_d   <= '0';
                 sel_mmio_d <= '0';
             else
-                sel_ram_d  <= sel_ram;
-                sel_fb_d   <= sel_fb;
-                sel_mmio_d <= sel_mmio;
+                sel_ram_d   <= sel_ram;
+                sel_fb_d    <= sel_fb;
+                sel_mmio_d  <= sel_mmio;
+                
+                -- La SDRAM no tiene un ciclo fijo de latencia, usa el O_valid
+                -- Asi que no usamos _d, la capturamos dinamicamente.
             end if;
         end if;
     end process;
@@ -265,6 +324,7 @@ begin
         O_dmem_we    => dmem_we,
         O_dmem_be    => dmem_be,
         I_dmem_rdata => dmem_rdata,
+        I_dmem_busy  => (sdram_busy and sel_sdram),
         I_irq        => '0',
         O_dbg_pc     => open
     );
@@ -345,12 +405,45 @@ begin
     );
 
     ---------------------------------------------------------------------------
+    -- Instancia del Controlador SDRAM
+    -- Mapeado a 0x20000000. Por ahora expone interfaz de 16 bits (Half-Word).
+    -- La direccion de byte de CPU dmem_addr(25 downto 1) = direccion 16-bit SDRAM.
+    ---------------------------------------------------------------------------
+    sdram_inst : sdram_controller port map (
+        I_clk        => I_clk_50,
+        I_reset      => reset,
+        I_addr       => dmem_addr(25 downto 1),
+        I_data_in    => dmem_wdata(15 downto 0),
+        O_data_out   => sdram_out16,
+        I_rd_en      => sdram_rd_en,
+        I_wr_en      => we_sdram,
+        I_byte_en    => dmem_be(1 downto 0),
+        O_busy       => sdram_busy,
+        O_valid      => sdram_valid,
+        
+        O_sdram_clk  => O_sdram_clk,
+        O_sdram_cke  => O_sdram_cke,
+        O_sdram_cs_n => O_sdram_cs_n,
+        O_sdram_ras_n=> O_sdram_ras_n,
+        O_sdram_cas_n=> O_sdram_cas_n,
+        O_sdram_we_n => O_sdram_we_n,
+        O_sdram_addr => O_sdram_addr,
+        O_sdram_ba   => O_sdram_ba,
+        O_sdram_ldqm => O_sdram_ldqm,
+        O_sdram_udqm => O_sdram_udqm,
+        IO_sdram_dq  => IO_sdram_dq
+    );
+
+    sdram_rdata <= X"0000" & sdram_out16;
+
+    ---------------------------------------------------------------------------
     -- Mux de lectura del bus de datos. Se usa el selector retrasado porque
     -- los esclavos devuelven el dato un ciclo despues de la peticion.
     ---------------------------------------------------------------------------
-    dmem_rdata <= ram_rdata  when sel_ram_d  = '1' else
-                  fb_rdata   when sel_fb_d   = '1' else
-                  mmio_rdata when sel_mmio_d = '1' else
+    dmem_rdata <= ram_rdata   when sel_ram_d  = '1' else
+                  fb_rdata    when sel_fb_d   = '1' else
+                  mmio_rdata  when sel_mmio_d = '1' else
+                  sdram_rdata when sel_sdram  = '1' else -- La SDRAM puede tomar varios ciclos
                   (others => '0');
 
 end architecture Behavioral;

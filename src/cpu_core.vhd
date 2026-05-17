@@ -50,6 +50,7 @@ entity cpu_core is
         O_dmem_we    : out std_logic;
         O_dmem_be    : out std_logic_vector(3 downto 0);
         I_dmem_rdata : in  word_t;
+        I_dmem_busy  : in  std_logic;
         -- Interrupcion externa (sin uso por ahora, se podra elevar
         -- desde el SoC). I_irq=1 genera entrada a trampa con cause=IRQ_M_EXT.
         I_irq        : in  std_logic;
@@ -169,6 +170,7 @@ architecture Behavioral of cpu_core is
             I_wb_rd      : in  std_logic_vector(4 downto 0);
             I_wb_reg_we  : in  std_logic;
             I_alu_busy   : in  std_logic;
+            I_dmem_busy  : in  std_logic;
             I_branch_take: in  std_logic;
             I_trap       : in  std_logic;
             O_fwd_a      : out std_logic_vector(1 downto 0);
@@ -176,6 +178,8 @@ architecture Behavioral of cpu_core is
             O_stall_pc    : out std_logic;
             O_stall_if_id : out std_logic;
             O_stall_id_ex : out std_logic;
+            O_stall_ex_mem: out std_logic;
+            O_stall_mem_wb: out std_logic;
             O_bubble_id_ex: out std_logic;
             O_bubble_ex_mem: out std_logic;
             O_flush_if   : out std_logic;
@@ -364,6 +368,8 @@ architecture Behavioral of cpu_core is
     signal h_fwd_a, h_fwd_b      : std_logic_vector(1 downto 0);
     signal h_stall_pc, h_stall_if_id : std_logic;
     signal h_stall_id_ex         : std_logic;
+    signal h_stall_ex_mem        : std_logic;
+    signal h_stall_mem_wb        : std_logic;
     signal h_bubble_id_ex        : std_logic;
     signal h_bubble_ex_mem       : std_logic;
     signal h_flush_if, h_flush_id: std_logic;
@@ -463,6 +469,7 @@ begin
         I_wb_rd      => mem_wb.rd,
         I_wb_reg_we  => mem_wb.reg_we,
         I_alu_busy   => ex_alu_busy,
+        I_dmem_busy  => I_dmem_busy,
         I_branch_take=> ex_branch_take,
         I_trap       => trap_any,
         O_fwd_a      => h_fwd_a,
@@ -470,7 +477,9 @@ begin
         O_stall_pc    => h_stall_pc,
         O_stall_if_id => h_stall_if_id,
         O_stall_id_ex => h_stall_id_ex,
-        O_bubble_id_ex => h_bubble_id_ex,
+        O_stall_ex_mem=> h_stall_ex_mem,
+        O_stall_mem_wb=> h_stall_mem_wb,
+        O_bubble_id_ex=> h_bubble_id_ex,
         O_bubble_ex_mem => h_bubble_ex_mem,
         O_flush_if   => h_flush_if,
         O_flush_id   => h_flush_id
@@ -755,6 +764,8 @@ begin
         if rising_edge(I_clk) then
             if I_reset = '1' then
                 ex_mem <= EX_MEM_NOP;
+            elsif h_stall_ex_mem = '1' then
+                null; -- SDRAM delay
             elsif h_bubble_ex_mem = '1' then
                 -- ALU ocupada en EX: insertamos NOP en MEM para que la
                 -- burbuja fluya por MEM/WB y no se procese dos veces la
@@ -891,6 +902,8 @@ begin
         if rising_edge(I_clk) then
             if I_reset = '1' then
                 mem_wb <= MEM_WB_NOP;
+            elsif h_stall_mem_wb = '1' then
+                null; -- SDRAM delay
             else
                 mem_wb.rd         <= ex_mem.rd;
                 mem_wb.reg_we     <= ex_mem.reg_we;
