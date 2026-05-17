@@ -222,6 +222,8 @@ architecture Behavioral of soc is
     signal sdram_valid: std_logic;
     signal sdram_rd_en: std_logic;
     signal sdram_out16: std_logic_vector(15 downto 0);
+    signal sdram_din16: std_logic_vector(15 downto 0);
+    signal sdram_be2  : std_logic_vector(1 downto 0);
 
     -- Senales de paleta del bridge MMIO al framebuffer
     signal pal_we    : std_logic;
@@ -409,15 +411,18 @@ begin
     -- Mapeado a 0x20000000. Por ahora expone interfaz de 16 bits (Half-Word).
     -- La direccion de byte de CPU dmem_addr(25 downto 1) = direccion 16-bit SDRAM.
     ---------------------------------------------------------------------------
+    sdram_din16 <= dmem_wdata(31 downto 16) when dmem_addr(1) = '1' else dmem_wdata(15 downto 0);
+    sdram_be2   <= dmem_be(3 downto 2) when dmem_addr(1) = '1' else dmem_be(1 downto 0);
+
     sdram_inst : sdram_controller port map (
         I_clk        => I_clk_50,
         I_reset      => reset,
         I_addr       => dmem_addr(25 downto 1),
-        I_data_in    => dmem_wdata(31 downto 16) when dmem_addr(1) = '1' else dmem_wdata(15 downto 0),
+        I_data_in    => sdram_din16,
         O_data_out   => sdram_out16,
         I_rd_en      => sdram_rd_en,
         I_wr_en      => we_sdram,
-        I_byte_en    => dmem_be(3 downto 2) when dmem_addr(1) = '1' else dmem_be(1 downto 0),
+        I_byte_en    => sdram_be2,
         O_busy       => sdram_busy,
         O_valid      => sdram_valid,
         
