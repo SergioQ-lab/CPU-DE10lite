@@ -180,8 +180,11 @@ begin
                     when others =>
                         -- Region de paleta: 0x20..0x5F, 4 bytes por entrada
                         -- Cada entrada usa los 12 bits bajos.
+                        -- Indice = (off - 0x20) / 4. Como off(5) vale 1 en
+                        -- 0x20-0x3F (indices 0-7) y 0 en 0x40-0x5F (indices 8-15),
+                        -- el bit 3 del indice es 'not off(5)'.
                         if (unsigned(off) >= 16#20#) and (unsigned(off) < 16#60#) then
-                            pal_index_int <= off(5 downto 2);
+                            pal_index_int <= (not off(5)) & off(4 downto 2);
                             pal_data_int  <= I_wdata(11 downto 0);
                             pal_we_int    <= '1';
                         end if;
