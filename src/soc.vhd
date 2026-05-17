@@ -208,6 +208,7 @@ architecture Behavioral of soc is
     signal sel_ram_d   : std_logic := '0';
     signal sel_fb_d    : std_logic := '0';
     signal sel_mmio_d  : std_logic := '0';
+    signal sel_sdram_d : std_logic := '0';
 
     -- Salidas de cada esclavo
     signal ram_rdata  : word_t;
@@ -299,16 +300,15 @@ begin
     begin
         if rising_edge(I_clk_50) then
             if reset = '1' then
-                sel_ram_d  <= '0';
-                sel_fb_d   <= '0';
-                sel_mmio_d <= '0';
+                sel_ram_d   <= '0';
+                sel_fb_d    <= '0';
+                sel_mmio_d  <= '0';
+                sel_sdram_d <= '0';
             else
                 sel_ram_d   <= sel_ram;
                 sel_fb_d    <= sel_fb;
                 sel_mmio_d  <= sel_mmio;
-                
-                -- La SDRAM no tiene un ciclo fijo de latencia, usa el O_valid
-                -- Asi que no usamos _d, la capturamos dinamicamente.
+                sel_sdram_d <= sel_sdram;
             end if;
         end if;
     end process;
@@ -444,11 +444,12 @@ begin
     ---------------------------------------------------------------------------
     -- Mux de lectura del bus de datos. Se usa el selector retrasado porque
     -- los esclavos devuelven el dato un ciclo despues de la peticion.
+    -- (El dato se evalua en la etapa WB de la CPU).
     ---------------------------------------------------------------------------
-    dmem_rdata <= ram_rdata   when sel_ram_d  = '1' else
-                  fb_rdata    when sel_fb_d   = '1' else
-                  mmio_rdata  when sel_mmio_d = '1' else
-                  sdram_rdata when sel_sdram  = '1' else -- La SDRAM puede tomar varios ciclos
+    dmem_rdata <= ram_rdata   when sel_ram_d   = '1' else
+                  fb_rdata    when sel_fb_d    = '1' else
+                  mmio_rdata  when sel_mmio_d  = '1' else
+                  sdram_rdata when sel_sdram_d = '1' else
                   (others => '0');
 
 end architecture Behavioral;
