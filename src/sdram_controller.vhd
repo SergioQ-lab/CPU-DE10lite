@@ -113,6 +113,9 @@ architecture Behavioral of sdram_controller is
     signal saved_addr   : std_logic_vector(24 downto 0) := (others => '0');
     signal saved_data   : std_logic_vector(15 downto 0) := (others => '0');
     signal saved_byte   : std_logic_vector(1 downto 0) := "00";
+    
+    signal prev_rd_en   : std_logic := '0';
+    signal prev_wr_en   : std_logic := '0';
 
     -- Control de pines inout
     signal dq_out_en    : std_logic := '0';
@@ -163,6 +166,9 @@ begin
                 dqm_reg   <= "00";
                 dq_out_en <= '0';
                 O_valid   <= '0';
+                
+                prev_rd_en <= I_rd_en;
+                prev_wr_en <= I_wr_en;
                 
                 -- El temporizador de refresco siempre avanza (excepto en init)
                 if state /= S_INIT_WAIT and state /= S_INIT_PRECHARGE and state /= S_INIT_LMR then
@@ -221,12 +227,12 @@ begin
                     when S_IDLE =>
                         if ref_timer >= T_REFRESH then
                             state <= S_REFRESH_CMD;
-                        elsif I_rd_en = '1' then
+                        elsif I_rd_en = '1' and prev_rd_en = '0' then
                             is_read    <= '1';
                             saved_addr <= I_addr;
                             saved_byte <= I_byte_en;
                             state      <= S_ACTIVATE;
-                        elsif I_wr_en = '1' then
+                        elsif I_wr_en = '1' and prev_wr_en = '0' then
                             is_read    <= '0';
                             saved_addr <= I_addr;
                             saved_data <= I_data_in;
