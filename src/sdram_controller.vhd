@@ -118,6 +118,7 @@ architecture Behavioral of sdram_controller is
     -- Control de pines inout
     signal dq_out_en    : std_logic := '0';
     signal dq_out       : std_logic_vector(15 downto 0) := (others => '0');
+    signal sdram_dq_falling : std_logic_vector(15 downto 0) := (others => '0');
 
 begin
     
@@ -141,6 +142,20 @@ begin
 
     -- Mantenemos ocupado el bus si no estamos en IDLE (stalls de CPU)
     O_busy  <= '1' when state /= S_IDLE else '0';
+
+    -- =========================================================================
+    -- Captura de datos en el flanco de BAJADA (mitad del ciclo)
+    -- =========================================================================
+    -- Como usamos O_sdram_clk <= not I_clk, la SDRAM escupe el dato tras
+    -- su flanco de subida (que coincide con nuestro flanco de bajada).
+    -- Capturarlo en nuestro flanco de bajada garantiza estar justo en el 
+    -- centro de la ventana de validez.
+    process (I_clk)
+    begin
+        if falling_edge(I_clk) then
+            sdram_dq_falling <= IO_sdram_dq;
+        end if;
+    end process;
 
     process (I_clk)
     begin
@@ -283,14 +298,16 @@ begin
                         state <= S_CAS2;
 
                     when S_CAS2 =>
-                        -- En el flanco de subida que nos saca de S_CAS2 (T=3.0),
-                        -- los datos que la SDRAM puso en el bus en T=2.5 (CAS 2)
-                        -- ya son estables. Los capturamos!
-                        O_data_out <= IO_sdram_dq;
+                        -- T2.0 a T3.0
+                        state <= S_CAS3;
+
+                    when S_CAS3 =>
+                        -- En T3.5 (falling_edge), 'sdram_dq_falling' atrapo el dato.
+                        -- Ahora en T4.0 (este flanco de subida), lo guardamos.
+                        O_data_out <= sdram_dq_falling;
                         O_valid    <= '1';
                         
-                        -- El Auto-Precharge ya se esta ocupando de cerrar la fila.
-                        -- Podemos volver a IDLE de forma segura.
+                        -- El Auto-Precharge ya esta cerrando la fila.
                         state      <= S_IDLE;
 
                     when S_WRITE_CMD =>
