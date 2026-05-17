@@ -93,6 +93,7 @@ architecture Behavioral of sdram_controller is
         S_CAS1,
         S_CAS2,
         S_CAS3,
+        S_CAS4,
         S_WRITE_CMD,
         S_TWR1,
         S_TWR2,
@@ -305,11 +306,20 @@ begin
                         state <= S_CAS3;
 
                     when S_CAS3 =>
-                        -- En T3.5 (falling_edge), 'sdram_dq_falling' atrapo el dato.
-                        -- Ahora en T4.0 (este flanco de subida), lo guardamos.
+                        -- En T3.5 la SDRAM acaba de salir de alta impedancia
+                        -- (tAC ~5.5ns todavia no ha vencido), asi que el bus
+                        -- esta en transicion. Capturar ahora da metaestabilidad
+                        -- (se observaba 0xAAAA = patron alternante). Esperamos
+                        -- un flanco mas.
+                        state <= S_CAS4;
+
+                    when S_CAS4 =>
+                        -- En T4.5 (falling_edge) el dato ya esta estable
+                        -- (5ns de margen tras tAC). 'sdram_dq_falling' lo
+                        -- atrapo. Ahora en T5.0 lo guardamos.
                         O_data_out <= sdram_dq_falling;
                         O_valid    <= '1';
-                        
+
                         -- El Auto-Precharge ya esta cerrando la fila.
                         state      <= S_IDLE;
 
