@@ -204,6 +204,7 @@ package riscv_pkg is
     constant MMIO_OFF_UART_TX  : std_logic_vector(7 downto 0) := X"10";
     constant MMIO_OFF_UART_ST  : std_logic_vector(7 downto 0) := X"14";
     constant MMIO_OFF_TIMER    : std_logic_vector(7 downto 0) := X"18";
+    constant MMIO_OFF_JOYSTICK : std_logic_vector(7 downto 0) := X"1C";
     constant MMIO_OFF_PALETTE  : std_logic_vector(7 downto 0) := X"20"; -- base de 16 paletas
 
 end package riscv_pkg;

@@ -31,7 +31,8 @@ entity top_de10_lite is
         VGA_R         : out std_logic_vector(3 downto 0);
         VGA_G         : out std_logic_vector(3 downto 0);
         VGA_B         : out std_logic_vector(3 downto 0);
-        UART_TX       : out std_logic
+        UART_TX       : out std_logic;
+        JOYSTICK      : in  std_logic_vector(6 downto 0)
     );
 end entity top_de10_lite;
 
@@ -55,7 +56,8 @@ architecture Behavioral of top_de10_lite is
             O_vga_r   : out std_logic_vector(3 downto 0);
             O_vga_g   : out std_logic_vector(3 downto 0);
             O_vga_b   : out std_logic_vector(3 downto 0);
-            O_uart_tx : out std_logic
+            O_uart_tx : out std_logic;
+            I_joystick: in  std_logic_vector(6 downto 0)
         );
     end component;
 
@@ -92,7 +94,8 @@ begin
         O_vga_r   => VGA_R,
         O_vga_g   => VGA_G,
         O_vga_b   => VGA_B,
-        O_uart_tx => UART_TX
+        O_uart_tx => UART_TX,
+        I_joystick=> JOYSTICK
     );
 
 end architecture Behavioral;

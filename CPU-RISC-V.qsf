@@ -175,9 +175,22 @@ set_instance_assignment -name IO_STANDARD "3.3-V LVCMOS" -to VGA_R[*]
 set_instance_assignment -name IO_STANDARD "3.3-V LVCMOS" -to VGA_G[*]
 set_instance_assignment -name IO_STANDARD "3.3-V LVCMOS" -to VGA_B[*]
 
-# UART TX en Arduino IO[1] (PIN_AB17). Salida pura.
-set_location_assignment PIN_AB17 -to UART_TX
+# UART TX en Arduino IO[1] (PIN_AB6). Salida pura.
+set_location_assignment PIN_AB6 -to UART_TX
 set_instance_assignment -name IO_STANDARD "3.3-V LVCMOS" -to UART_TX
+
+# JOYSTICK (Arduino IO8 a IO14)
+# IO8 (RST), IO9 (SET), IO10 (MID), IO11 (RIGHT), IO12 (LEFT), IO13 (DOWN), IO14 (UP)
+set_location_assignment PIN_AB17 -to JOYSTICK[0]
+set_location_assignment PIN_AA17 -to JOYSTICK[1]
+set_location_assignment PIN_AB19 -to JOYSTICK[2]
+set_location_assignment PIN_AA19 -to JOYSTICK[3]
+set_location_assignment PIN_Y19 -to JOYSTICK[4]
+set_location_assignment PIN_AB20 -to JOYSTICK[5]
+set_location_assignment PIN_AB21 -to JOYSTICK[6]
+
+set_instance_assignment -name IO_STANDARD "3.3-V LVCMOS" -to JOYSTICK[*]
+set_instance_assignment -name WEAK_PULL_UP_RESISTOR ON -to JOYSTICK[*]
 
 # Restricciones de reloj y timing (en fichero SDC aparte)
 set_global_assignment -name SDC_FILE "CPU-RISC-V.sdc"

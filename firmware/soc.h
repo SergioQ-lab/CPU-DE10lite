@@ -27,6 +27,7 @@
 #define UART_TX_REG     REG(0x10)   /* W: byte a transmitir */
 #define UART_STATUS     REG(0x14)   /* R: bit 0 = busy */
 #define TIMER           REG(0x18)   /* R: contador libre 32b @ 50 MHz */
+#define JOYSTICK        REG(0x1C)   /* R: bits[6:0] -> joystick UP, DOWN, LEFT, RIGHT, MID, SET, RST */
 
 /* Paleta de 16 entradas (escritura). Cada entrada = 12 bits xRGB. */
 #define PALETTE(i)      REG(0x20 + ((i) & 0xF) * 4)

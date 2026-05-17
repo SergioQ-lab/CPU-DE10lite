@@ -51,7 +51,8 @@ entity mmio_bridge is
         -- senales para el modulo VGA: actualizacion de paleta
         O_pal_we    : out std_logic;
         O_pal_index : out std_logic_vector(3 downto 0);
-        O_pal_data  : out std_logic_vector(11 downto 0)
+        O_pal_data  : out std_logic_vector(11 downto 0);
+        I_joystick  : in  std_logic_vector(6 downto 0)
     );
 end entity mmio_bridge;
 
@@ -203,6 +204,7 @@ begin
                 when MMIO_OFF_HEX      => O_rdata <= X"00" & r_hex;
                 when MMIO_OFF_UART_ST  => O_rdata <= X"0000000" & "000" & uart_busy;
                 when MMIO_OFF_TIMER    => O_rdata <= std_logic_vector(r_timer);
+                when MMIO_OFF_JOYSTICK => O_rdata <= X"000000" & '0' & I_joystick;
                 when others            => O_rdata <= (others => '0');
             end case;
         end if;

@@ -1,63 +1,142 @@
-/* ---------------------------------------------------------------------
- * main.c - TEST AISLADO de la division/modulo
- *
- * Hipotesis: tu CPU se cuelga cuando ejecuta DIV/REM, por eso el snake
- * se queda en HEX=000000 (random_coord usa % y la CPU nunca sale).
- *
- * Test:
- *   1) LED splash + HEX 0xABCDEF
- *   2) Marcador antes de dividir: LED 9 + HEX 0x111111
- *   3) Hace una division (100 / 32 = 3, 100 %% 32 = 4) con volatiles
- *      (el compilador NO puede pre-calcular)
- *   4) Si la division retorna, muestra el resultado en LEDs y HEX
- *
- * Esperado SI el divisor funciona:
- *   - LEDs: 0x134 (LED 8 = post-div marker, LEDs 5,4 = q=3, LED 2 = r=4)
- *   - HEX:  000304  (q=3 en HEX2, r=4 en HEX0)
- *
- * Esperado SI el divisor cuelga:
- *   - LEDs quedan en 0x200 (solo LED 9)
- *   - HEX queda en 111111
- *   - La CPU se cuelga, no avanza nunca
- * --------------------------------------------------------------------- */
 #include "soc.h"
 
-static inline void delay(uint32_t iters)
-{
-    __asm__ volatile (
-        "1: addi %0, %0, -1\n"
-        "   bne  %0, zero, 1b\n"
-        : "+r" (iters)
-    );
+/* Colores y tamaño de la cuadricula */
+#define GRID_SZ  10
+#define COLS     (FB_WIDTH / GRID_SZ)
+#define ROWS     (FB_HEIGHT / GRID_SZ)
+#define MAX_LEN  100
+
+/* Indices de la paleta original */
+enum {
+    C_BLACK = 0, C_DRED = 1, C_DGRN = 2, C_DYEL = 3,
+    C_DBLU = 4, C_DMAG = 5, C_DCYA = 6, C_LGRY = 7,
+    C_DGRY = 8, C_RED = 9, C_GRN = 10, C_YEL = 11,
+    C_BLU = 12, C_MAG = 13, C_CYA = 14, C_WHT = 15
+};
+
+/* Variables globales del estado del juego */
+int snake_x[MAX_LEN];
+int snake_y[MAX_LEN];
+int snake_len;
+int dir_x, dir_y;
+int apple_x, apple_y;
+
+/* Generador pseudo-aleatorio usando el contador de hardware libre a 50MHz */
+int random_coord(int max) {
+    uint32_t r = TIMER; 
+    /* Como tu CPU tiene división por hardware (~34 ciclos), usamos módulo sin problema */
+    return r % max;
+}
+
+void init_game() {
+    fb_clear(C_BLACK);
+    
+    snake_len = 4;
+    dir_x = 1;
+    dir_y = 0;
+    
+    /* Crear la serpiente inicial en el centro */
+    for (int i = 0; i < snake_len; i++) {
+        snake_x[i] = (COLS / 2) - i;
+        snake_y[i] = ROWS / 2;
+    }
+    
+    /* Generar primera manzana */
+    apple_x = random_coord(COLS);
+    apple_y = random_coord(ROWS);
+    
+    /* Enviar la puntuacion inicial a los displays de 7 segmentos */
+    HEX_REG = snake_len;
 }
 
 void main(void)
 {
-    /* Splash inicial */
-    LEDR    = 0x3FF;
-    HEX_REG = 0xABCDEF;
-    delay(5000000);
+    /* Saludo visual para confirmar reset */
+    LEDR = 0x3FF;
+    delay_ms(200);
+    LEDR = 0;
 
-    /* Marcador antes de dividir */
-    LEDR    = 0x200;       /* LED 9 ON: pre-division */
-    HEX_REG = 0x111111;
-    delay(5000000);
+    /* Bucle infinito del sistema (para reiniciar el juego al perder) */
+    while (1) {
+        init_game();
+        int game_over = 0;
 
-    /* Operandos volatiles para que el compilador NO los pre-calcule */
-    volatile int a = 100;
-    volatile int b = 32;
+        /* Pinta la manzana inicial */
+        fb_fill_rect(apple_x * GRID_SZ, apple_y * GRID_SZ, GRID_SZ, GRID_SZ, C_RED);
 
-    /* Division: 100 / 32 = 3, resto 100 %% 32 = 4 */
-    int q = a / b;
-    int r = a % b;
+        while (!game_over) {
+            /* 1. LEER CONTROLES (Joystick Digital) */
+            /* Control (activo en bajo):
+             * Bit 6 = UP
+             * Bit 5 = DOWN
+             * Bit 4 = LEFT
+             * Bit 3 = RIGHT
+             */
+            uint32_t joy = JOYSTICK;
+            
+            /* Evitamos que la serpiente se de la vuelta sobre si misma (180 grados) */
+            if      (!(joy & (1 << 6)) && dir_y == 0) { dir_x =  0; dir_y = -1; } /* UP */
+            else if (!(joy & (1 << 5)) && dir_y == 0) { dir_x =  0; dir_y =  1; } /* DOWN */
+            else if (!(joy & (1 << 4)) && dir_x == 0) { dir_x = -1; dir_y =  0; } /* LEFT */
+            else if (!(joy & (1 << 3)) && dir_x == 0) { dir_x =  1; dir_y =  0; } /* RIGHT */
 
-    /* Si llegamos aqui, las operaciones DIV y REM funcionaron */
-    LEDR    = 0x100 | ((q & 0xF) << 4) | (r & 0xF);
-    /* 0x100 | 0x30 | 0x04 = 0x134:
-     *   LED 8 = post-division marker
-     *   LEDs 5,4 = q = 3 (0011)
-     *   LED 2   = r = 4 (0100) */
-    HEX_REG = (q << 8) | r;   /* HEX2..HEX0 = 304 */
+            /* 2. CALCULAR NUEVA POSICIÓN DE LA CABEZA */
+            int next_x = snake_x[0] + dir_x;
+            int next_y = snake_y[0] + dir_y;
 
-    while (1) { }
+            /* 3. COLISIONES */
+            /* Chocar contra los bordes de la pantalla */
+            if (next_x < 0 || next_x >= COLS || next_y < 0 || next_y >= ROWS) {
+                game_over = 1;
+            }
+            
+            /* Chocar contra el propio cuerpo */
+            for (int i = 0; i < snake_len; i++) {
+                if (snake_x[i] == next_x && snake_y[i] == next_y) {
+                    game_over = 1;
+                }
+            }
+
+            if (game_over) {
+                /* Animación de derrota y volver a empezar */
+                fb_clear(C_DRED);
+                delay_ms(1500);
+                break; 
+            }
+
+            /* 4. ACTUALIZAR MATRIZ EN MEMORIA (Arrastrar el cuerpo) */
+            int tail_x = snake_x[snake_len - 1];
+            int tail_y = snake_y[snake_len - 1];
+
+            /* Desplazamos hasta snake_len (inclusive) para no perder la cola vieja
+               en caso de que comamos una manzana y snake_len aumente. */
+            for (int i = snake_len; i > 0; i--) {
+                snake_x[i] = snake_x[i - 1];
+                snake_y[i] = snake_y[i - 1];
+            }
+            snake_x[0] = next_x;
+            snake_y[0] = next_y;
+
+            /* 5. LÓGICA DE LA MANZANA */
+            if (next_x == apple_x && next_y == apple_y) {
+                /* Comer manzana: aumentamos tamaño */
+                if (snake_len < MAX_LEN) snake_len++;
+                HEX_REG = snake_len; /* Actualiza marcador */
+                
+                /* Nueva manzana aleatoria */
+                apple_x = random_coord(COLS);
+                apple_y = random_coord(ROWS);
+                fb_fill_rect(apple_x * GRID_SZ, apple_y * GRID_SZ, GRID_SZ, GRID_SZ, C_RED);
+            } else {
+                /* Si no come, borramos el pixel de la cola antigua para simular movimiento */
+                fb_fill_rect(tail_x * GRID_SZ, tail_y * GRID_SZ, GRID_SZ, GRID_SZ, C_BLACK);
+            }
+
+            /* 6. DIBUJAR CABEZA EN NUEVA POSICIÓN */
+            fb_fill_rect(next_x * GRID_SZ, next_y * GRID_SZ, GRID_SZ, GRID_SZ, C_GRN);
+
+            /* 7. VELOCIDAD (Frames per second) */
+            delay_ms(100); 
+        }
+    }
 }

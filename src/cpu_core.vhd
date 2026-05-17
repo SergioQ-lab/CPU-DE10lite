@@ -202,6 +202,11 @@ architecture Behavioral of cpu_core is
     -- (cuando la BRAM aun no tenia datos validos).
     signal flush_pending  : std_logic := '1';
 
+    -- Buffer de instruccion para stalls
+    signal fetch_buffer      : word_t := (others => '0');
+    signal fetch_pc          : word_t := (others => '0');
+    signal fetch_buffer_full : std_logic := '0';
+
     -- Registro IF/ID
     signal if_id_instr : word_t := X"00000013"; -- NOP (ADDI x0, x0, 0)
     signal if_id_pc    : word_t := (others => '0');
@@ -607,6 +612,26 @@ begin
         end if;
     end process;
 
+    -- Buffer de instruccion para stalls:
+    -- Si la etapa IF se detiene (h_stall_if_id = '1'), la memoria sigue
+    -- enviando la instruccion correspondiente a pc_latched que no pudimos
+    -- latchear en IF/ID. Debemos guardarla en un buffer para usarla cuando
+    -- el stall se libere.
+    fetch_buffer_proc : process (I_clk)
+    begin
+        if rising_edge(I_clk) then
+            if I_reset = '1' or h_flush_if = '1' or flush_pending = '1' then
+                fetch_buffer_full <= '0';
+            elsif h_stall_if_id = '1' and fetch_buffer_full = '0' then
+                fetch_buffer      <= I_imem_data;
+                fetch_pc          <= pc_latched;
+                fetch_buffer_full <= '1';
+            elsif h_stall_if_id = '0' then
+                fetch_buffer_full <= '0';
+            end if;
+        end if;
+    end process;
+
     -- Registro IF/ID con flush, stall y latencia de BRAM
     if_id_proc : process (I_clk)
     begin
@@ -622,8 +647,13 @@ begin
                 -- mantener registro
                 null;
             else
-                if_id_instr <= I_imem_data;
-                if_id_pc    <= pc_latched;
+                if fetch_buffer_full = '1' then
+                    if_id_instr <= fetch_buffer;
+                    if_id_pc    <= fetch_pc;
+                else
+                    if_id_instr <= I_imem_data;
+                    if_id_pc    <= pc_latched;
+                end if;
             end if;
         end if;
     end process;
