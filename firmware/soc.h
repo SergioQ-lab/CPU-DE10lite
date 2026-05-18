@@ -32,6 +32,10 @@
 /* Paleta de 16 entradas (escritura). Cada entrada = 12 bits xRGB. */
 #define PALETTE(i)      REG(0x20 + ((i) & 0xF) * 4)
 
+/* Contadores de performance del D-cache (solo lectura). */
+#define CACHE_HITS      REG(0x60)   /* R: 32-bit hit count, monotonico */
+#define CACHE_MISSES    REG(0x64)   /* R: 32-bit miss count, monotonico */
+
 /* Empaqueta xRGB de 12 bits desde componentes 0..15 */
 #define RGB12(r, g, b)  ((((r) & 0xF) << 8) | (((g) & 0xF) << 4) | ((b) & 0xF))
 

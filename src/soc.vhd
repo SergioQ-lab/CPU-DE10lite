@@ -154,7 +154,10 @@ architecture Behavioral of soc is
             O_pal_we    : out std_logic;
             O_pal_index : out std_logic_vector(3 downto 0);
             O_pal_data  : out std_logic_vector(11 downto 0);
-            I_joystick  : in  std_logic_vector(6 downto 0)
+            I_joystick  : in  std_logic_vector(6 downto 0);
+            -- Contadores del D-cache (lectura via MMIO)
+            I_cache_hits   : in  std_logic_vector(31 downto 0);
+            I_cache_misses : in  std_logic_vector(31 downto 0)
         );
     end component;
 
@@ -170,7 +173,7 @@ architecture Behavioral of soc is
             I_byte_en    : in    std_logic_vector(1 downto 0);
             O_busy       : out   std_logic;
             O_valid      : out   std_logic;
-            
+
             O_sdram_clk  : out   std_logic;
             O_sdram_cke  : out   std_logic;
             O_sdram_cs_n : out   std_logic;
@@ -182,6 +185,33 @@ architecture Behavioral of soc is
             O_sdram_ldqm : out   std_logic;
             O_sdram_udqm : out   std_logic;
             IO_sdram_dq  : inout std_logic_vector(15 downto 0)
+        );
+    end component;
+
+    component dcache is
+        port (
+            I_clk        : in  std_logic;
+            I_reset      : in  std_logic;
+            -- CPU
+            I_req        : in  std_logic;
+            I_addr       : in  std_logic_vector(31 downto 0);
+            I_wdata      : in  std_logic_vector(31 downto 0);
+            O_rdata      : out std_logic_vector(31 downto 0);
+            I_we         : in  std_logic;
+            I_be         : in  std_logic_vector(3 downto 0);
+            O_busy       : out std_logic;
+            -- SDRAM
+            O_mem_addr   : out std_logic_vector(24 downto 0);
+            O_mem_wdata  : out std_logic_vector(15 downto 0);
+            I_mem_rdata  : in  std_logic_vector(15 downto 0);
+            O_mem_rd_en  : out std_logic;
+            O_mem_wr_en  : out std_logic;
+            O_mem_be     : out std_logic_vector(1 downto 0);
+            I_mem_busy   : in  std_logic;
+            I_mem_valid  : in  std_logic;
+            -- Counters
+            O_hit_count  : out std_logic_vector(31 downto 0);
+            O_miss_count : out std_logic_vector(31 downto 0)
         );
     end component;
 
@@ -216,15 +246,23 @@ architecture Behavioral of soc is
     signal mmio_rdata : word_t;
     signal sdram_rdata: word_t;
 
-    -- Senales para SDRAM
+    -- Senales para SDRAM (lado fisico al chip, gestionadas por el cache)
     signal sel_sdram  : std_logic;
-    signal we_sdram   : std_logic;
     signal sdram_busy : std_logic;
     signal sdram_valid: std_logic;
-    signal sdram_rd_en: std_logic;
     signal sdram_out16: std_logic_vector(15 downto 0);
-    signal sdram_din16: std_logic_vector(15 downto 0);
-    signal sdram_be2  : std_logic_vector(1 downto 0);
+
+    -- Senales entre cache y SDRAM controller (interno)
+    signal mem_addr   : std_logic_vector(24 downto 0);
+    signal mem_wdata  : std_logic_vector(15 downto 0);
+    signal mem_rd_en  : std_logic;
+    signal mem_wr_en  : std_logic;
+    signal mem_be     : std_logic_vector(1 downto 0);
+
+    -- Contadores del cache (van al MMIO bridge)
+    signal cache_hits   : std_logic_vector(31 downto 0);
+    signal cache_misses : std_logic_vector(31 downto 0);
+    signal cache_busy   : std_logic;
 
     -- Senales de paleta del bridge MMIO al framebuffer
     signal pal_we    : std_logic;
@@ -292,8 +330,7 @@ begin
     -- =========================================================================
     we_ram    <= sel_ram   and dmem_we;
     we_fb     <= sel_fb    and dmem_we;
-    we_sdram  <= sel_sdram and dmem_we;
-    sdram_rd_en <= sel_sdram and (not dmem_we);
+    -- El acceso a SDRAM ahora va via el D-cache; no hay we_sdram directo.
 
     -- Retraso de 1 ciclo para la fase de lectura
     sel_delay : process (I_clk_50)
@@ -326,7 +363,7 @@ begin
         O_dmem_we    => dmem_we,
         O_dmem_be    => dmem_be,
         I_dmem_rdata => dmem_rdata,
-        I_dmem_busy  => (sdram_busy and sel_sdram),
+        I_dmem_busy  => (cache_busy and sel_sdram),
         I_irq        => '0',
         O_dbg_pc     => open
     );
@@ -403,29 +440,57 @@ begin
         O_pal_we    => pal_we,
         O_pal_index => pal_index,
         O_pal_data  => pal_data,
-        I_joystick  => I_joystick
+        I_joystick  => I_joystick,
+        I_cache_hits   => cache_hits,
+        I_cache_misses => cache_misses
     );
 
     ---------------------------------------------------------------------------
-    -- Instancia del Controlador SDRAM
-    -- Mapeado a 0x20000000. Por ahora expone interfaz de 16 bits (Half-Word).
-    -- La direccion de byte de CPU dmem_addr(25 downto 1) = direccion 16-bit SDRAM.
+    -- D-Cache + Controlador SDRAM
+    --
+    -- El D-cache se interpone entre la CPU y el controlador SDRAM. Expone una
+    -- interfaz 32-bit que coincide con el bus de la CPU; internamente realiza
+    -- dos transacciones de 16 bits al controlador SDRAM cuando hace falta
+    -- (miss de lectura o write-through).
+    --
+    -- Como las lecturas devuelven 32 bits validos (a diferencia del antiguo
+    -- esquema donde se replicaba el halfword), LW/SW sobre SDRAM funciona
+    -- correctamente sin intervencion de la CPU.
     ---------------------------------------------------------------------------
-    sdram_din16 <= dmem_wdata(31 downto 16) when dmem_addr(1) = '1' else dmem_wdata(15 downto 0);
-    sdram_be2   <= dmem_be(3 downto 2) when dmem_addr(1) = '1' else dmem_be(1 downto 0);
+    dcache_inst : dcache port map (
+        I_clk        => I_clk_50,
+        I_reset      => reset,
+        I_req        => sel_sdram,
+        I_addr       => dmem_addr,
+        I_wdata      => dmem_wdata,
+        O_rdata      => sdram_rdata,
+        I_we         => dmem_we,
+        I_be         => dmem_be,
+        O_busy       => cache_busy,
+        O_mem_addr   => mem_addr,
+        O_mem_wdata  => mem_wdata,
+        I_mem_rdata  => sdram_out16,
+        O_mem_rd_en  => mem_rd_en,
+        O_mem_wr_en  => mem_wr_en,
+        O_mem_be     => mem_be,
+        I_mem_busy   => sdram_busy,
+        I_mem_valid  => sdram_valid,
+        O_hit_count  => cache_hits,
+        O_miss_count => cache_misses
+    );
 
     sdram_inst : sdram_controller port map (
         I_clk        => I_clk_50,
         I_reset      => reset,
-        I_addr       => dmem_addr(25 downto 1),
-        I_data_in    => sdram_din16,
+        I_addr       => mem_addr,
+        I_data_in    => mem_wdata,
         O_data_out   => sdram_out16,
-        I_rd_en      => sdram_rd_en,
-        I_wr_en      => we_sdram,
-        I_byte_en    => sdram_be2,
+        I_rd_en      => mem_rd_en,
+        I_wr_en      => mem_wr_en,
+        I_byte_en    => mem_be,
         O_busy       => sdram_busy,
         O_valid      => sdram_valid,
-        
+
         O_sdram_clk  => O_sdram_clk,
         O_sdram_cke  => O_sdram_cke,
         O_sdram_cs_n => O_sdram_cs_n,
@@ -438,8 +503,6 @@ begin
         O_sdram_udqm => O_sdram_udqm,
         IO_sdram_dq  => IO_sdram_dq
     );
-
-    sdram_rdata <= sdram_out16 & sdram_out16;
 
     ---------------------------------------------------------------------------
     -- Mux de lectura del bus de datos. Se usa el selector retrasado porque

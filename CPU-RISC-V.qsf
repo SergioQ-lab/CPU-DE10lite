@@ -31,6 +31,7 @@ set_global_assignment -name SMART_RECOMPILE OFF
 # ---- Lista de ficheros fuente ----
 set_global_assignment -name VHDL_FILE src/riscv_pkg.vhd
 set_global_assignment -name VHDL_FILE src/sdram_controller.vhd
+set_global_assignment -name VHDL_FILE src/dcache.vhd
 set_global_assignment -name VHDL_FILE src/register_file.vhd
 set_global_assignment -name VHDL_FILE src/decoder.vhd
 set_global_assignment -name VHDL_FILE src/multiplier.vhd

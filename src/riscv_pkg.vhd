@@ -207,6 +207,8 @@ package riscv_pkg is
     constant MMIO_OFF_TIMER    : std_logic_vector(7 downto 0) := X"18";
     constant MMIO_OFF_JOYSTICK : std_logic_vector(7 downto 0) := X"1C";
     constant MMIO_OFF_PALETTE  : std_logic_vector(7 downto 0) := X"20"; -- base de 16 paletas
+    constant MMIO_OFF_CACHE_HIT  : std_logic_vector(7 downto 0) := X"60"; -- D-cache hit counter
+    constant MMIO_OFF_CACHE_MISS : std_logic_vector(7 downto 0) := X"64"; -- D-cache miss counter
 
 end package riscv_pkg;
 
