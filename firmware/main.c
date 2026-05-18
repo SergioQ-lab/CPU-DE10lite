@@ -189,11 +189,14 @@ int main(void) {
 
     int view = 0;
     int prev = 1;
-    uint32_t total_hits   = CACHE_HITS;
-    uint32_t total_misses = CACHE_MISSES;
-    uint32_t ratio_pct    = (total_misses != 0)
-                              ? ((uint32_t)((uint64_t)total_hits * 100u
-                                            / (total_hits + total_misses)))
+    uint32_t total_hits     = CACHE_HITS;
+    uint32_t total_misses   = CACHE_MISSES;
+    uint32_t total_accesses = total_hits + total_misses;
+    /* Aritmetica de 32 bits a proposito: con N_WORDS=1024 los totales no
+     * superan ~3000, asi que total_hits*100 cabe holgadamente en 32 bits
+     * y no arrastramos __udivdi3 de libgcc al firmware bare-metal. */
+    uint32_t ratio_pct      = (total_accesses != 0)
+                              ? ((total_hits * 100u) / total_accesses)
                               : 0xFFFFFFu;
 
     while (1) {
