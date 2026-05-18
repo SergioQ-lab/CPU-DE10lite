@@ -97,7 +97,8 @@ architecture Behavioral of sdram_controller is
         S_WRITE_CMD,
         S_TWR1,
         S_TWR2,
-        S_PRECHARGE_WAIT
+        S_PRECHARGE_WAIT,
+        S_RECOVERY
     );
 
     signal state        : fsm_state_t := S_INIT_WAIT;
@@ -143,7 +144,13 @@ begin
     IO_sdram_dq   <= dq_out when dq_out_en = '1' else (others => 'Z');
 
     -- Mantenemos ocupado el bus si no estamos en IDLE (stalls de CPU)
-    O_busy  <= '1' when state /= S_IDLE else '0';
+    -- RECOVERY se considera "no busy" porque es un ciclo de gracia
+    -- intencional en el que la CPU avanza fuera del stall ANTES de que
+    -- nosotros volvamos a mirar rd_en/wr_en. Sin esto, en una secuencia
+    -- SH inmediatamente seguida de LHU el controlador re-disparaba con
+    -- saved_addr del SH justo cuando la CPU avanzaba a la LHU, y la
+    -- etapa WB capturaba O_data_out STALE.
+    O_busy  <= '0' when (state = S_IDLE or state = S_RECOVERY) else '1';
 
     -- =========================================================================
     -- Captura de datos en el flanco de BAJADA (mitad del ciclo)
@@ -334,7 +341,10 @@ begin
                         O_valid    <= '1';
 
                         -- El Auto-Precharge ya esta cerrando la fila.
-                        state      <= S_IDLE;
+                        -- Pasamos por RECOVERY (busy=0 pero sin aceptar
+                        -- nuevas peticiones) para que la CPU avance fuera
+                        -- del stall antes de que volvamos a mirar rd_en/wr_en.
+                        state      <= S_RECOVERY;
 
                     when S_WRITE_CMD =>
                         cmd_reg <= CMD_WRITE;
@@ -361,12 +371,22 @@ begin
                         state      <= S_PRECHARGE_WAIT;
 
                     when S_PRECHARGE_WAIT =>
-                        -- tRP = 15ns (1 ciclo). Al acabar volvemos a IDLE
-                        if wait_timer < T_RP - 1 then 
-                            wait_timer <= wait_timer + 1; 
-                        else 
-                            state <= S_IDLE; 
+                        -- tRP = 15ns (1 ciclo). Al acabar pasamos por
+                        -- RECOVERY antes de aceptar la siguiente peticion.
+                        if wait_timer < T_RP - 1 then
+                            wait_timer <= wait_timer + 1;
+                        else
+                            state <= S_RECOVERY;
                         end if;
+
+                    when S_RECOVERY =>
+                        -- Ciclo intencional con busy=0 pero sin chequear
+                        -- rd_en/wr_en. Permite a la CPU advance ex_mem
+                        -- fuera del stall antes de que aceptemos la siguiente
+                        -- transaccion. Critico para secuencias SH;LHU back-
+                        -- to-back: sin esto re-disparabamos con el contexto
+                        -- del SH justo cuando la CPU avanzaba al LHU.
+                        state <= S_IDLE;
 
                     when others =>
                         state <= S_INIT_WAIT;
