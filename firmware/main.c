@@ -1,220 +1,213 @@
 #include "soc.h"
 #include <stdint.h>
 
+#define SDRAM_BASE 0x20000000U
+#define SDRAM_W    ((volatile uint32_t *)SDRAM_BASE)
+#define SDRAM_H    ((volatile uint16_t *)SDRAM_BASE)
+
 /*
- * SDRAM stress test
+ * D-cache test + benchmark
  *
- * 5 fases que aislan tipos distintos de bug. La pantalla dibuja una
- * barra por fase: gris = pendiente, azul = en curso, verde = pasa,
- * rojo = falla. Si todas pasan, fb se rellena de verde y HEX=0xEEEEEE.
- * Si alguna falla, KEY1 cicla por el diagnostico de la PRIMERA fase
- * fallada: numero de fase / addr / leido / esperado.
+ * Fase A — CORRECTITUD
+ *   Escribe N palabras de 32 bits con un patron derivado de la direccion y
+ *   las lee de vuelta. Verifica que cada lectura coincide. Esto valida que:
+ *     - El cache devuelve los datos correctos en hits y misses.
+ *     - El write-through actualiza tanto el cache como la SDRAM.
+ *     - LW/SW de 32 bits funciona (antes estaba roto, replicaba halfwords).
  *
- * LEDR:
- *   bit i  = fase i+1 pasada
- *   bit 9  = todas OK
+ * Fase B — TASA DE HITS
+ *   Lee la misma region dos veces. Mide hits/misses con los contadores de
+ *   MMIO. La primera pasada debe tener ~N misses (cache frio). La segunda
+ *   pasada debe tener ~N hits (cache caliente).
  *
- * Layout de SDRAM (16-bit words, 25-bit addr):
- *   addr[24:23] = banco  (4)
- *   addr[22:10] = fila   (8192)
- *   addr[9:0]   = columna (1024)
+ * Salida:
+ *   Pantalla verde brillante  -> todo OK
+ *   Pantalla roja             -> error de correctitud (KEY1 cicla detalles)
+ *   Pantalla azul             -> tasa de hits inesperada (cache rota)
+ *
+ * HEX (cuando OK, ciclar con KEY1):
+ *   Vista 0: 0xEEEEEE (success marker)
+ *   Vista 1: hits totales (24 bits bajos)
+ *   Vista 2: misses totales (24 bits bajos)
+ *   Vista 3: ratio hit/miss * 100 si hay misses, 0xFFFFFF si no hay
  */
 
-#define SDRAM_BASE 0x20000000U
-#define SDRAM      ((volatile uint16_t *)SDRAM_BASE)
-
-#define N_PHASES   5
+#define N_WORDS 1024   /* 4 KB -> cabe en el cache exactamente */
+/* Phase B usa addresses 4096..8191 (palabras 1024..2047). Coinciden con
+ * los mismos indices que phase A (0..1023) pero con tag distinto, asi
+ * forzamos evictions y vemos misses en la primera pasada. */
+#define PHASE_B_OFFSET 1024
+#define PATTERN(i) ((uint32_t)(((i) ^ 0xA5A5A5A5U) + 0xCAFE0000U))
 
 enum {
     C_BG    = 0,
     C_OK    = 1,   /* verde   */
     C_FAIL  = 2,   /* rojo    */
-    C_BUSY  = 3,   /* azul    */
-    C_AMBER = 4,   /* amarillo (libre) */
-    C_PEND  = 5,   /* gris    */
+    C_WARN  = 3,   /* azul    */
+    C_AMBER = 4,   /* amarillo */
 };
 
-static uint8_t   phase_status[N_PHASES];        /* 0=pend, 1=ok, 2=fail, 3=busy */
-static uint32_t  fail_info[N_PHASES][3];        /* [addr, got, exp] */
+static uint32_t g_first_fail_addr;
+static uint32_t g_first_fail_got;
+static uint32_t g_first_fail_exp;
+static int      g_correctness_ok = 1;
 
-#define BAR_Y0   (FB_HEIGHT/2 - 40)
-#define BAR_H    80
+static uint32_t g_hits_before, g_misses_before;
+static uint32_t g_hits_after,  g_misses_after;
 
-static void draw_panel(void) {
-    int bar_w = FB_WIDTH / N_PHASES;
-    for (int p = 0; p < N_PHASES; p++) {
-        int x = p * bar_w;
-        uint8_t color;
-        switch (phase_status[p]) {
-            case 1:  color = C_OK;    break;
-            case 2:  color = C_FAIL;  break;
-            case 3:  color = C_BUSY;  break;
-            default: color = C_PEND;  break;
+static void fill_screen(uint8_t color) {
+    for (int y = 0; y < FB_HEIGHT; y++)
+        for (int x = 0; x < FB_WIDTH; x++)
+            fb_putpixel(x, y, color);
+}
+
+static void phase_correctness(void) {
+    /* Escritura completa */
+    for (uint32_t i = 0; i < N_WORDS; i++) {
+        SDRAM_W[i] = PATTERN(i);
+    }
+    /* Lectura y verificacion */
+    for (uint32_t i = 0; i < N_WORDS; i++) {
+        uint32_t got = SDRAM_W[i];
+        uint32_t exp = PATTERN(i);
+        if (got != exp) {
+            g_correctness_ok    = 0;
+            g_first_fail_addr   = i * 4;
+            g_first_fail_got    = got;
+            g_first_fail_exp    = exp;
+            return;
         }
-        fb_fill_rect(x + 2, BAR_Y0, bar_w - 4, BAR_H, color);
     }
 }
 
-static void record_fail(int ph, uint32_t addr, uint32_t got, uint32_t exp) {
-    phase_status[ph]   = 2;
-    fail_info[ph][0]   = addr;
-    fail_info[ph][1]   = got;
-    fail_info[ph][2]   = exp;
-}
+static void phase_hit_rate(void) {
+    /* Baseline counters */
+    uint32_t h0 = CACHE_HITS;
+    uint32_t m0 = CACHE_MISSES;
 
-/* ===== Fase 1: walking 1s / walking 0s en addr 0 ===== */
-static int phase_walking_bits(void) {
-    for (int i = 0; i < 16; i++) {
-        uint16_t exp = (uint16_t)(1u << i);
-        SDRAM[0] = exp;
-        uint16_t got = SDRAM[0];
-        if (got != exp) { record_fail(0, (uint32_t)i, got, exp); return 0; }
+    /* Primera pasada en region nueva: cache frio para estos addresses,
+     * deberia ser todo misses (los indices coinciden con phase A pero
+     * los tags son distintos, asi evictamos al hacer fill). */
+    uint32_t sink = 0;
+    for (uint32_t i = 0; i < N_WORDS; i++) {
+        sink ^= SDRAM_W[PHASE_B_OFFSET + i];
     }
-    for (int i = 0; i < 16; i++) {
-        uint16_t exp = (uint16_t)~(1u << i);
-        SDRAM[0] = exp;
-        uint16_t got = SDRAM[0];
-        if (got != exp) { record_fail(0, (uint32_t)(0x100 + i), got, exp); return 0; }
-    }
-    return 1;
-}
+    g_hits_before   = CACHE_HITS   - h0;
+    g_misses_before = CACHE_MISSES - m0;
 
-/* ===== Fase 2: fill secuencial 16K palabras (16 filas) ===== */
-#define N_SEQ 16384u
-static int phase_addr_as_data(void) {
-    for (uint32_t i = 0; i < N_SEQ; i++) {
-        SDRAM[i] = (uint16_t)(i ^ 0xA5A5u);
-        if ((i & 0x3FF) == 0) HEX_REG = 0x200000u | i;
+    /* Segunda pasada misma region: cache caliente, deberia ser todo hits */
+    uint32_t h1 = CACHE_HITS;
+    uint32_t m1 = CACHE_MISSES;
+    for (uint32_t i = 0; i < N_WORDS; i++) {
+        sink ^= SDRAM_W[PHASE_B_OFFSET + i];
     }
-    for (uint32_t i = 0; i < N_SEQ; i++) {
-        uint16_t exp = (uint16_t)(i ^ 0xA5A5u);
-        uint16_t got = SDRAM[i];
-        if (got != exp) { record_fail(1, i, got, exp); return 0; }
-        if ((i & 0x3FF) == 0) HEX_REG = 0x200000u | (i + 0x10000u);
-    }
-    return 1;
-}
+    g_hits_after   = CACHE_HITS   - h1;
+    g_misses_after = CACHE_MISSES - m1;
 
-/* ===== Fase 3: una palabra en col 0 de 64 filas distintas ===== */
-#define N_ROWS 64u
-static int phase_row_stride(void) {
-    for (uint32_t r = 0; r < N_ROWS; r++) {
-        SDRAM[r * 1024u] = (uint16_t)(0xC000u + r);
-    }
-    for (uint32_t r = 0; r < N_ROWS; r++) {
-        uint16_t exp = (uint16_t)(0xC000u + r);
-        uint16_t got = SDRAM[r * 1024u];
-        if (got != exp) { record_fail(2, r * 1024u, got, exp); return 0; }
-    }
-    return 1;
+    /* sink se descarta pero forzamos que no se optimice escribiendolo a un
+     * LED apagado por si el compilador es agresivo */
+    if (sink == 0xDEADBEEF) LEDR = 0;
 }
-
-/* ===== Fase 4: una palabra en col 0, fila 0 de cada banco ===== */
-static int phase_bank_stride(void) {
-    for (uint32_t b = 0; b < 4u; b++) {
-        SDRAM[b * 0x800000u] = (uint16_t)(0xB000u + b);
-    }
-    for (uint32_t b = 0; b < 4u; b++) {
-        uint16_t exp = (uint16_t)(0xB000u + b);
-        uint16_t got = SDRAM[b * 0x800000u];
-        if (got != exp) { record_fail(3, b * 0x800000u, got, exp); return 0; }
-    }
-    return 1;
-}
-
-/* ===== Fase 5: retencion tras 200ms (test del auto-refresh) ===== */
-#define N_REF 1024u
-static int phase_refresh(void) {
-    for (uint32_t i = 0; i < N_REF; i++) {
-        SDRAM[i] = (uint16_t)(0xDEADu ^ i);
-    }
-    delay_ms(200);
-    for (uint32_t i = 0; i < N_REF; i++) {
-        uint16_t exp = (uint16_t)(0xDEADu ^ i);
-        uint16_t got = SDRAM[i];
-        if (got != exp) { record_fail(4, i, got, exp); return 0; }
-    }
-    return 1;
-}
-
-typedef int (*phase_fn)(void);
-static const phase_fn phases[N_PHASES] = {
-    phase_walking_bits,
-    phase_addr_as_data,
-    phase_row_stride,
-    phase_bank_stride,
-    phase_refresh,
-};
 
 int main(void) {
     fb_set_palette(0, 0x000);
-    fb_set_palette(1, 0x0F0); /* verde     */
-    fb_set_palette(2, 0xF00); /* rojo      */
-    fb_set_palette(3, 0x00F); /* azul      */
-    fb_set_palette(4, 0xFF0); /* amarillo  */
-    fb_set_palette(5, 0x555); /* gris      */
+    fb_set_palette(1, 0x0F0); /* verde   */
+    fb_set_palette(2, 0xF00); /* rojo    */
+    fb_set_palette(3, 0x00F); /* azul    */
+    fb_set_palette(4, 0xFF0); /* amarillo*/
     fb_clear(C_BG);
-    LEDR = 0;
+    LEDR    = 0;
     HEX_REG = 0;
 
-    for (int p = 0; p < N_PHASES; p++) phase_status[p] = 0;
-    draw_panel();
+    /* === Fase A: correctitud === */
+    LEDR    = 0x100;
+    HEX_REG = 0x010000;
+    phase_correctness();
 
-    int all_ok    = 1;
-    int first_fail = -1;
-
-    for (int p = 0; p < N_PHASES; p++) {
-        phase_status[p] = 3; /* busy */
-        draw_panel();
-        HEX_REG = (uint32_t)(p + 1) << 20; /* numero de fase en HEX5 */
-        LEDR    = (uint32_t)(1u << (p + 5)); /* indicador "corriendo" */
-
-        if (phases[p]()) {
-            phase_status[p] = 1;
-            LEDR |= (uint32_t)(1u << p);
-        } else {
-            phase_status[p] = 2;
-            all_ok = 0;
-            if (first_fail < 0) first_fail = p;
+    if (!g_correctness_ok) {
+        /* Pantalla roja, KEY1 cicla detalles del primer fallo */
+        fill_screen(C_FAIL);
+        LEDR    = 0x001;
+        int view = 0;
+        int prev = 1;
+        HEX_REG = 0x000000 | (g_first_fail_addr & 0xFFFF);
+        while (1) {
+            int k = (KEYS >> 1) & 1;
+            if (prev == 1 && k == 0) {
+                view = (view + 1) & 3;
+                switch (view) {
+                    case 0: HEX_REG = g_first_fail_addr & 0xFFFFFF; break;
+                    case 1: HEX_REG = g_first_fail_got  & 0xFFFFFF; break;
+                    case 2: HEX_REG = g_first_fail_exp  & 0xFFFFFF; break;
+                    case 3: HEX_REG = 0xF00000; break;
+                }
+            }
+            prev = k;
+            delay_ms(10);
         }
-        draw_panel();
     }
 
-    if (all_ok) {
-        fb_clear(C_OK);
-        LEDR    = 0x3FF;
-        HEX_REG = 0xEEEEEE;
-        while (1) { }
+    /* === Fase B: hit rate === */
+    LEDR    = 0x200;
+    HEX_REG = 0x020000;
+    phase_hit_rate();
+
+    /* Comprobamos que la primera pasada tuvo principalmente misses
+     * (>= 90% de los accesos) y la segunda pasada principalmente hits
+     * (>= 90% de los accesos). Con N=1024 esperamos:
+     *   primera: ~1024 misses, ~0 hits
+     *   segunda: ~1024 hits,   ~0 misses */
+    int ok_cold = (g_misses_before >= (N_WORDS * 9 / 10));
+    int ok_warm = (g_hits_after    >= (N_WORDS * 9 / 10));
+
+    if (!ok_cold || !ok_warm) {
+        fill_screen(C_WARN);
+        LEDR    = 0x004;
+        int view = 0;
+        int prev = 1;
+        HEX_REG = 0x030000;
+        while (1) {
+            int k = (KEYS >> 1) & 1;
+            if (prev == 1 && k == 0) {
+                view = (view + 1) & 3;
+                switch (view) {
+                    case 0: HEX_REG = g_hits_before   & 0xFFFFFF; break;
+                    case 1: HEX_REG = g_misses_before & 0xFFFFFF; break;
+                    case 2: HEX_REG = g_hits_after    & 0xFFFFFF; break;
+                    case 3: HEX_REG = g_misses_after  & 0xFFFFFF; break;
+                }
+            }
+            prev = k;
+            delay_ms(10);
+        }
     }
 
-    /* Algun fallo: KEY1 cicla las 4 vistas del primer fallo */
-    int view     = 0;
-    int prev_key = 1;
-    HEX_REG = (uint32_t)((first_fail + 1) << 20) | 0xF; /* phase + marca 'F' */
-    LEDR    = 0x000;
-    /* indica que fase fallo */
-    LEDR    = (uint32_t)(1u << first_fail);
+    /* === SUCCESS === */
+    fill_screen(C_OK);
+    LEDR    = 0x3FF;
+    HEX_REG = 0xEEEEEE;
+
+    int view = 0;
+    int prev = 1;
+    uint32_t total_hits   = CACHE_HITS;
+    uint32_t total_misses = CACHE_MISSES;
+    uint32_t ratio_pct    = (total_misses != 0)
+                              ? ((uint32_t)((uint64_t)total_hits * 100u
+                                            / (total_hits + total_misses)))
+                              : 0xFFFFFFu;
 
     while (1) {
-        int key1 = (KEYS >> 1) & 1;
-        if (prev_key == 1 && key1 == 0) {
+        int k = (KEYS >> 1) & 1;
+        if (prev == 1 && k == 0) {
             view = (view + 1) & 3;
             switch (view) {
-                case 0: /* fase fallada (1..5) en HEX5, F en HEX0 */
-                    HEX_REG = (uint32_t)((first_fail + 1) << 20) | 0xF;
-                    break;
-                case 1: /* direccion del fallo */
-                    HEX_REG = fail_info[first_fail][0] & 0xFFFFFFu;
-                    break;
-                case 2: /* dato leido */
-                    HEX_REG = fail_info[first_fail][1] & 0xFFFFu;
-                    break;
-                case 3: /* dato esperado */
-                    HEX_REG = fail_info[first_fail][2] & 0xFFFFu;
-                    break;
+                case 0: HEX_REG = 0xEEEEEE; break;
+                case 1: HEX_REG = total_hits   & 0xFFFFFF; break;
+                case 2: HEX_REG = total_misses & 0xFFFFFF; break;
+                case 3: HEX_REG = ratio_pct    & 0xFFFFFF; break;
             }
         }
-        prev_key = key1;
+        prev = k;
         delay_ms(10);
     }
     return 0;
