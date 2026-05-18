@@ -240,14 +240,27 @@ begin
                     -- FASE OPERATIVA: IDLE Y AUTO-REFRESCO
                     -- ========================================================
                     when S_IDLE =>
+                        -- Activamos por NIVEL, no por flanco. Con flanco
+                        -- (prev_rd_en/prev_wr_en) los accesos consecutivos de
+                        -- la CPU se perdian: durante el stall las senales se
+                        -- quedan altas, asi que entre el final de una
+                        -- transaccion y el siguiente load/store nunca hay
+                        -- transicion 0->1. Resultado observado: solo se
+                        -- ejecutaba la primera, las demas devolvian el dato
+                        -- cacheado en O_data_out.
+                        --
+                        -- La proteccion contra "re-disparo de la misma
+                        -- transaccion" la da el propio busy: mientras
+                        -- state /= IDLE la CPU esta stalleada y no presenta
+                        -- una segunda peticion.
                         if ref_timer >= T_REFRESH then
                             state <= S_REFRESH_CMD;
-                        elsif I_rd_en = '1' and prev_rd_en = '0' then
+                        elsif I_rd_en = '1' then
                             is_read    <= '1';
                             saved_addr <= I_addr;
                             saved_byte <= I_byte_en;
                             state      <= S_ACTIVATE;
-                        elsif I_wr_en = '1' and prev_wr_en = '0' then
+                        elsif I_wr_en = '1' then
                             is_read    <= '0';
                             saved_addr <= I_addr;
                             saved_data <= I_data_in;
