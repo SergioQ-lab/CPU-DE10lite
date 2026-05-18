@@ -1,20 +1,66 @@
 --------------------------------------------------------------------------------
 -- sdram_controller.vhd
 --
--- Controlador para SDRAM IS42S16320D-7TL (64 MBytes) de la DE10-Lite.
--- Frecuencia de reloj: 50 MHz (Periodo = 20 ns).
--- 
--- Arquitectura de la RAM: 32M x 16 bits
---   - 4 Bancos (BA0, BA1) -> bits [24:23]
---   - 8192 Filas (A0-A12) -> bits [22:10]
---   - 1024 Columnas (A0-A9) -> bits [9:0]
+-- Controlador SDRAM random-access para IS42S16320D-7TL en DE10-Lite.
+-- Reescritura desde cero. La interfaz exterior se mantiene compatible
+-- con la version anterior (soc.vhd no necesita tocarse).
 --
--- CARACTERISTICAS:
---   - Inicializacion automatica al encender.
---   - Auto-Refresco cada 7.8 us.
---   - Accesos de Lectura/Escritura mediante Auto-Precharge (A10=1).
---   - CAS Latency = 2, Burst Length = 1.
+-- ============================================================================
+-- PROTOCOLO DE HANDSHAKE
+-- ============================================================================
+-- La CPU presenta su peticion mientras una instruccion load/store esta en
+-- la etapa MEM:
+--
+--   * I_rd_en = '1'  -> leer 16 bits de I_addr
+--   * I_wr_en = '1'  -> escribir I_data_in en I_addr con mascara I_byte_en
+--
+-- El controlador devuelve O_busy en la misma combinacion logica:
+--
+--   busy = 1   <=>  hay transaccion en vuelo, O estamos en IDLE con peticion
+--                   pendiente (CPU debe stallear, no avanzar pipeline).
+--   busy = 0   <=>  estamos en RECOVERY (un ciclo de gracia para que la CPU
+--                   avance ex_mem), O en IDLE sin peticion (sistema reposo).
+--
+-- El bit clave es la fase RECOVERY. Sin ella habia una race condition en
+-- la que la CPU veia busy=0 y avanzaba ex_mem al mismo ciclo en que la FSM
+-- veia rd_en/wr_en altos y re-disparaba con el contexto viejo. Con RECOVERY
+-- introducimos un ciclo aislado: la CPU avanza, y solo en el SIGUIENTE
+-- ciclo (ya en IDLE) volvemos a mirar las senales, que ahora reflejan la
+-- nueva instruccion.
+--
+-- O_data_out se mantiene estable tras cada read hasta el siguiente read.
+-- O_valid pulsa un ciclo cuando el dato se acaba de capturar.
+--
+-- ============================================================================
+-- ARQUITECTURA DE MEMORIA
+-- ============================================================================
+-- IS42S16320D-7TL: 32M x 16 bits, 4 bancos, 8192 filas/banco, 1024 cols/fila.
+--   I_addr[24:23] = banco
+--   I_addr[22:10] = fila
+--   I_addr[ 9: 0] = columna
+--
+-- ============================================================================
+-- TIMINGS @ 50 MHz (periodo 20 ns)
+-- ============================================================================
+--   T_INIT_WAIT = 6000  (120 us de espera inicial tras power-up)
+--   T_RP        = 1     (>=15 ns Row Precharge)
+--   T_RCD       = 1     (>=15 ns RAS to CAS Delay) - cubierto por S_TRCD
+--   T_RC        = 3     (>=60 ns Refresh Cycle)
+--   T_MRD       = 2     (Mode Register Delay)
+--   T_REFRESH   = 380   (7.6 us, margen frente a tREF/8192 = 7.81 us)
+--   CAS Latency = 2
+--   Burst Length= 1
+--
+-- ============================================================================
+-- TIMING DE LECTURA (clock invertido para la SDRAM, sample en T_FPGA bajada)
+-- ============================================================================
+-- Cmd READ emitido por el FPGA en T_FPGA=1 (rising edge), visible a la SDRAM
+-- en su flanco de subida T_FPGA=1.5 (porque O_sdram_clk = not I_clk).
+-- Con CL=2, el dato aparece en DQ con tAC despues de T_FPGA=3.5.
+-- Capturarlo en el flanco de bajada T_FPGA=4.5 nos da casi un ciclo de
+-- margen sobre tAC (~5.5 ns), elimina la metaestabilidad observada.
 --------------------------------------------------------------------------------
+
 library IEEE;
 use IEEE.STD_LOGIC_1164.all;
 use IEEE.NUMERIC_STD.all;
@@ -24,17 +70,17 @@ entity sdram_controller is
         -- Sistema
         I_clk        : in    std_logic;
         I_reset      : in    std_logic;
-        
+
         -- Bus interno del SoC
-        I_addr       : in    std_logic_vector(24 downto 0); -- 32M words = 25 bits
+        I_addr       : in    std_logic_vector(24 downto 0);
         I_data_in    : in    std_logic_vector(15 downto 0);
         O_data_out   : out   std_logic_vector(15 downto 0);
         I_rd_en      : in    std_logic;
         I_wr_en      : in    std_logic;
-        I_byte_en    : in    std_logic_vector(1 downto 0); -- (1) = High Byte, (0) = Low Byte
+        I_byte_en    : in    std_logic_vector(1 downto 0);
         O_busy       : out   std_logic;
         O_valid      : out   std_logic;
-        
+
         -- Interfaz fisica SDRAM
         O_sdram_clk  : out   std_logic;
         O_sdram_cke  : out   std_logic;
@@ -52,25 +98,31 @@ end entity sdram_controller;
 
 architecture Behavioral of sdram_controller is
 
-    -- Comandos SDRAM (CS_N, RAS_N, CAS_N, WE_N)
-    constant CMD_NOP             : std_logic_vector(3 downto 0) := "0111";
-    constant CMD_ACTIVE          : std_logic_vector(3 downto 0) := "0011";
-    constant CMD_READ            : std_logic_vector(3 downto 0) := "0101";
-    constant CMD_WRITE           : std_logic_vector(3 downto 0) := "0100";
-    constant CMD_PRECHARGE       : std_logic_vector(3 downto 0) := "0010";
-    constant CMD_AUTO_REFRESH    : std_logic_vector(3 downto 0) := "0001";
-    constant CMD_LOAD_MODE       : std_logic_vector(3 downto 0) := "0000";
+    -- ========================================================================
+    -- Comandos SDRAM (concatenacion {CS_N, RAS_N, CAS_N, WE_N})
+    -- ========================================================================
+    constant CMD_NOP          : std_logic_vector(3 downto 0) := "0111";
+    constant CMD_ACTIVE       : std_logic_vector(3 downto 0) := "0011";
+    constant CMD_READ         : std_logic_vector(3 downto 0) := "0101";
+    constant CMD_WRITE        : std_logic_vector(3 downto 0) := "0100";
+    constant CMD_PRECHARGE    : std_logic_vector(3 downto 0) := "0010";
+    constant CMD_AUTO_REFRESH : std_logic_vector(3 downto 0) := "0001";
+    constant CMD_LOAD_MODE    : std_logic_vector(3 downto 0) := "0000";
 
-    -- Tiempos en ciclos a 50 MHz (Periodo = 20ns)
-    constant T_INIT_WAIT : integer := 6000; -- 120 us
-    constant T_RP        : integer := 1;    -- Precharge Time (Min 15ns)
-    constant T_RC        : integer := 3;    -- Refresh Cycle (Min 60ns)
-    constant T_MRD       : integer := 2;    -- Mode Register Delay (2 ciclos)
-    constant T_REFRESH   : integer := 380;  -- Auto-Refresh interval (7.8 us)
+    -- ========================================================================
+    -- Timings (ciclos a 50 MHz)
+    -- ========================================================================
+    constant T_INIT_WAIT : integer := 6000;
+    constant T_RP        : integer := 1;
+    constant T_RC        : integer := 3;
+    constant T_MRD       : integer := 2;
+    constant T_REFRESH   : integer := 380;
 
+    -- ========================================================================
     -- Estados de la FSM
+    -- ========================================================================
     type fsm_state_t is (
-        -- Init
+        -- Inicializacion
         S_INIT_WAIT,
         S_INIT_PRECHARGE,
         S_INIT_TRP,
@@ -80,57 +132,67 @@ architecture Behavioral of sdram_controller is
         S_INIT_TRC2,
         S_INIT_LMR,
         S_INIT_TMRD,
-        
+
         -- Operacion normal
         S_IDLE,
         S_REFRESH_CMD,
         S_REFRESH_TRC,
-        
-        -- Accesos de lectura/escritura
+
+        -- Activacion comun a read/write
         S_ACTIVATE,
         S_TRCD,
+
+        -- Pipeline de lectura
         S_READ_CMD,
         S_CAS1,
         S_CAS2,
         S_CAS3,
         S_CAS4,
+
+        -- Pipeline de escritura
         S_WRITE_CMD,
         S_TWR1,
         S_TWR2,
         S_PRECHARGE_WAIT,
+
+        -- Ciclo de gracia: busy=0, FSM ignora rd/wr_en este ciclo.
         S_RECOVERY
     );
 
-    signal state        : fsm_state_t := S_INIT_WAIT;
-    signal wait_timer   : integer range 0 to 8191 := 0;
-    signal ref_timer    : integer range 0 to 511  := 0;
-    
-    signal cmd_reg      : std_logic_vector(3 downto 0) := CMD_NOP;
-    signal addr_reg     : std_logic_vector(12 downto 0):= (others => '0');
-    signal ba_reg       : std_logic_vector(1 downto 0) := "00";
-    signal dqm_reg      : std_logic_vector(1 downto 0) := "00";
-    
-    signal is_read      : std_logic := '0';
-    signal saved_addr   : std_logic_vector(24 downto 0) := (others => '0');
-    signal saved_data   : std_logic_vector(15 downto 0) := (others => '0');
-    signal saved_byte   : std_logic_vector(1 downto 0) := "00";
-    
-    signal prev_rd_en   : std_logic := '0';
-    signal prev_wr_en   : std_logic := '0';
+    signal state      : fsm_state_t := S_INIT_WAIT;
+    signal wait_timer : integer range 0 to 8191 := 0;
+    signal ref_timer  : integer range 0 to 511  := 0;
 
-    -- Control de pines inout
-    signal dq_out_en    : std_logic := '0';
-    signal dq_out       : std_logic_vector(15 downto 0) := (others => '0');
+    -- Salidas registradas hacia la SDRAM
+    signal cmd_reg  : std_logic_vector(3 downto 0)  := CMD_NOP;
+    signal addr_reg : std_logic_vector(12 downto 0) := (others => '0');
+    signal ba_reg   : std_logic_vector(1 downto 0)  := "00";
+    signal dqm_reg  : std_logic_vector(1 downto 0)  := "11"; -- arranque enmascarado
+
+    -- Latch de la transaccion en curso
+    signal is_read    : std_logic                     := '0';
+    signal saved_addr : std_logic_vector(24 downto 0) := (others => '0');
+    signal saved_data : std_logic_vector(15 downto 0) := (others => '0');
+    signal saved_byte : std_logic_vector(1 downto 0)  := "00";
+
+    -- Control del tri-state DQ
+    signal dq_out_en : std_logic                     := '0';
+    signal dq_out    : std_logic_vector(15 downto 0) := (others => '0');
+
+    -- Captura del bus en flanco de bajada para tener margen sobre tAC
     signal sdram_dq_falling : std_logic_vector(15 downto 0) := (others => '0');
 
 begin
-    
-    -- Inversion de fase para reloj externo (Mejora drastica de Setup/Hold times)
+
+    -- ========================================================================
+    -- Reloj invertido a la SDRAM: nuestro flanco de bajada coincide con
+    -- el flanco de subida de la SDRAM. Captura en falling_edge(I_clk)
+    -- equivale a "sample en el centro del semi-ciclo SDRAM", maximo margen.
+    -- ========================================================================
     O_sdram_clk <= not I_clk;
-    
-    O_sdram_cke  <= '1';
-    
-    -- Asignacion de pines fijos al exterior
+    O_sdram_cke <= '1';
+
+    -- Pines de control hacia el chip
     O_sdram_cs_n  <= cmd_reg(3);
     O_sdram_ras_n <= cmd_reg(2);
     O_sdram_cas_n <= cmd_reg(1);
@@ -140,67 +202,73 @@ begin
     O_sdram_udqm  <= dqm_reg(1);
     O_sdram_ldqm  <= dqm_reg(0);
 
-    -- Buffer tri-estado bidireccional para el bus de datos
-    IO_sdram_dq   <= dq_out when dq_out_en = '1' else (others => 'Z');
+    -- Buffer tri-estado bidireccional
+    IO_sdram_dq <= dq_out when dq_out_en = '1' else (others => 'Z');
 
-    -- Mantenemos ocupado el bus si no estamos en IDLE (stalls de CPU)
-    -- RECOVERY se considera "no busy" porque es un ciclo de gracia
-    -- intencional en el que la CPU avanza fuera del stall ANTES de que
-    -- nosotros volvamos a mirar rd_en/wr_en. Sin esto, en una secuencia
-    -- SH inmediatamente seguida de LHU el controlador re-disparaba con
-    -- saved_addr del SH justo cuando la CPU avanzaba a la LHU, y la
-    -- etapa WB capturaba O_data_out STALE.
-    O_busy  <= '0' when (state = S_IDLE or state = S_RECOVERY) else '1';
+    -- ========================================================================
+    -- O_busy combinacional con la regla del handshake.
+    --
+    -- '0' SOLO si:
+    --   * estamos en RECOVERY (ciclo de gracia intencional), o
+    --   * estamos en IDLE y la CPU no esta pidiendo nada.
+    -- En cualquier otro caso (transaccion en vuelo, init, refresh, IDLE-con-
+    -- peticion-pendiente) el bus esta ocupado.
+    --
+    -- Que sea combinacional sobre rd_en/wr_en es lo que hace que en el ciclo
+    -- IDLE con peticion la CPU YA vea busy=1 y se stallee, antes de que la
+    -- FSM transicione a ACTIVATE en el siguiente flanco.
+    -- ========================================================================
+    O_busy <= '0' when state = S_RECOVERY else
+              '0' when (state = S_IDLE and I_rd_en = '0' and I_wr_en = '0') else
+              '1';
 
-    -- =========================================================================
-    -- Captura de datos en el flanco de BAJADA (mitad del ciclo)
-    -- =========================================================================
-    -- Como usamos O_sdram_clk <= not I_clk, la SDRAM escupe el dato tras
-    -- su flanco de subida (que coincide con nuestro flanco de bajada).
-    -- Capturarlo en nuestro flanco de bajada garantiza estar justo en el 
-    -- centro de la ventana de validez.
-    process (I_clk)
+    -- ========================================================================
+    -- Captura del bus DQ en el flanco de bajada del reloj FPGA.
+    -- Sirve para muestrear el dato de la SDRAM con margen sobre tAC.
+    -- ========================================================================
+    capture_proc : process (I_clk)
     begin
         if falling_edge(I_clk) then
             sdram_dq_falling <= IO_sdram_dq;
         end if;
     end process;
 
-    process (I_clk)
+    -- ========================================================================
+    -- FSM principal
+    -- ========================================================================
+    fsm_proc : process (I_clk)
     begin
         if rising_edge(I_clk) then
             if I_reset = '1' then
-                state       <= S_INIT_WAIT;
-                wait_timer  <= 0;
-                ref_timer   <= 0;
-                cmd_reg     <= CMD_NOP;
-                addr_reg    <= (others => '0');
-                ba_reg      <= "00";
-                dqm_reg     <= "00";
-                dq_out_en   <= '0';
-                O_valid     <= '0';
-                O_data_out  <= (others => '0');
+                state      <= S_INIT_WAIT;
+                wait_timer <= 0;
+                ref_timer  <= 0;
+                cmd_reg    <= CMD_NOP;
+                addr_reg   <= (others => '0');
+                ba_reg     <= "00";
+                dqm_reg    <= "11";
+                dq_out_en  <= '0';
+                O_valid    <= '0';
+                O_data_out <= (others => '0');
             else
-                -- Por defecto en cada ciclo
+                -- Defaults cada ciclo. El case puede sobrescribir.
                 cmd_reg   <= CMD_NOP;
                 addr_reg  <= (others => '0');
                 ba_reg    <= "00";
                 dqm_reg   <= "00";
                 dq_out_en <= '0';
                 O_valid   <= '0';
-                
-                prev_rd_en <= I_rd_en;
-                prev_wr_en <= I_wr_en;
-                
-                -- El temporizador de refresco siempre avanza (excepto en init)
-                if state /= S_INIT_WAIT and state /= S_INIT_PRECHARGE and state /= S_INIT_LMR then
+
+                -- Contador de refresco siempre corre (excepto durante el
+                -- power-up wait, antes de que la SDRAM este lista).
+                if state /= S_INIT_WAIT then
                     ref_timer <= ref_timer + 1;
                 end if;
 
                 case state is
-                    -- ========================================================
-                    -- FASE DE INICIALIZACION
-                    -- ========================================================
+                    -- ============================================
+                    -- INICIALIZACION
+                    -- ============================================
                     when S_INIT_WAIT =>
                         if wait_timer < T_INIT_WAIT then
                             wait_timer <= wait_timer + 1;
@@ -210,12 +278,16 @@ begin
 
                     when S_INIT_PRECHARGE =>
                         cmd_reg    <= CMD_PRECHARGE;
-                        addr_reg   <= (10 => '1', others => '0'); -- A10 = 1 para Precharge ALL
+                        addr_reg   <= (10 => '1', others => '0'); -- A10=1 PRECHARGE ALL
                         wait_timer <= 0;
                         state      <= S_INIT_TRP;
 
                     when S_INIT_TRP =>
-                        if wait_timer < T_RP - 1 then wait_timer <= wait_timer + 1; else state <= S_INIT_REF1; end if;
+                        if wait_timer < T_RP - 1 then
+                            wait_timer <= wait_timer + 1;
+                        else
+                            state <= S_INIT_REF1;
+                        end if;
 
                     when S_INIT_REF1 =>
                         cmd_reg    <= CMD_AUTO_REFRESH;
@@ -223,7 +295,11 @@ begin
                         state      <= S_INIT_TRC1;
 
                     when S_INIT_TRC1 =>
-                        if wait_timer < T_RC - 1 then wait_timer <= wait_timer + 1; else state <= S_INIT_REF2; end if;
+                        if wait_timer < T_RC - 1 then
+                            wait_timer <= wait_timer + 1;
+                        else
+                            state <= S_INIT_REF2;
+                        end if;
 
                     when S_INIT_REF2 =>
                         cmd_reg    <= CMD_AUTO_REFRESH;
@@ -231,35 +307,40 @@ begin
                         state      <= S_INIT_TRC2;
 
                     when S_INIT_TRC2 =>
-                        if wait_timer < T_RC - 1 then wait_timer <= wait_timer + 1; else state <= S_INIT_LMR; end if;
+                        if wait_timer < T_RC - 1 then
+                            wait_timer <= wait_timer + 1;
+                        else
+                            state <= S_INIT_LMR;
+                        end if;
 
                     when S_INIT_LMR =>
                         cmd_reg    <= CMD_LOAD_MODE;
-                        -- Mode Register: CAS Latency = 2, Burst Length = 1, Sequential
-                        addr_reg   <= "0000000100000"; 
+                        -- Mode Register:
+                        --   [2:0] = burst length = 1 -> "000"
+                        --   [ 3 ] = burst type   = sequential -> '0'
+                        --   [6:4] = CAS latency  = 2 -> "010"
+                        --   [8:7] = op. mode     = standard -> "00"
+                        --   [ 9 ] = write burst  = burst -> '0'
+                        addr_reg   <= "0000000100000";  -- A5=1, resto 0
                         wait_timer <= 0;
                         state      <= S_INIT_TMRD;
 
                     when S_INIT_TMRD =>
-                        if wait_timer < T_MRD - 1 then wait_timer <= wait_timer + 1; else state <= S_IDLE; ref_timer <= 0; end if;
+                        if wait_timer < T_MRD - 1 then
+                            wait_timer <= wait_timer + 1;
+                        else
+                            state     <= S_IDLE;
+                            ref_timer <= 0;
+                        end if;
 
-                    -- ========================================================
-                    -- FASE OPERATIVA: IDLE Y AUTO-REFRESCO
-                    -- ========================================================
+                    -- ============================================
+                    -- OPERACION NORMAL
+                    -- ============================================
                     when S_IDLE =>
-                        -- Activamos por NIVEL, no por flanco. Con flanco
-                        -- (prev_rd_en/prev_wr_en) los accesos consecutivos de
-                        -- la CPU se perdian: durante el stall las senales se
-                        -- quedan altas, asi que entre el final de una
-                        -- transaccion y el siguiente load/store nunca hay
-                        -- transicion 0->1. Resultado observado: solo se
-                        -- ejecutaba la primera, las demas devolvian el dato
-                        -- cacheado en O_data_out.
-                        --
-                        -- La proteccion contra "re-disparo de la misma
-                        -- transaccion" la da el propio busy: mientras
-                        -- state /= IDLE la CPU esta stalleada y no presenta
-                        -- una segunda peticion.
+                        -- Prioridad: refresh > read > write.
+                        -- Capturamos toda la peticion (addr/data/byte/es-read)
+                        -- en este ciclo. A partir del proximo flanco la CPU
+                        -- puede mantener stall mientras hagamos la transaccion.
                         if ref_timer >= T_REFRESH then
                             state <= S_REFRESH_CMD;
                         elsif I_rd_en = '1' then
@@ -282,110 +363,107 @@ begin
                         state      <= S_REFRESH_TRC;
 
                     when S_REFRESH_TRC =>
-                        if wait_timer < T_RC - 1 then wait_timer <= wait_timer + 1; else state <= S_IDLE; end if;
+                        if wait_timer < T_RC - 1 then
+                            wait_timer <= wait_timer + 1;
+                        else
+                            state <= S_IDLE;
+                        end if;
 
-                    -- ========================================================
-                    -- FASE OPERATIVA: READ / WRITE
-                    -- ========================================================
+                    -- ============================================
+                    -- ACTIVACION (comun a read y write)
+                    -- ============================================
                     when S_ACTIVATE =>
-                        -- Mandamos comando ACTIVATE para abrir la fila
                         cmd_reg  <= CMD_ACTIVE;
                         ba_reg   <= saved_addr(24 downto 23);
-                        addr_reg <= saved_addr(22 downto 10);
+                        addr_reg <= saved_addr(22 downto 10); -- fila
                         state    <= S_TRCD;
 
                     when S_TRCD =>
-                        -- tRCD: RAS to CAS delay = 15ns = 1 ciclo @ 50 MHz
+                        -- tRCD (15 ns) cubierto por este ciclo. NOP en el bus.
                         if is_read = '1' then
                             state <= S_READ_CMD;
                         else
                             state <= S_WRITE_CMD;
                         end if;
 
+                    -- ============================================
+                    -- LECTURA (CL=2 + 1 ciclo extra de margen tAC)
+                    -- ============================================
                     when S_READ_CMD =>
-                        cmd_reg <= CMD_READ;
-                        ba_reg  <= saved_addr(24 downto 23);
-                        -- La columna son los 10 bits bajos. Ponemos A10=1 para Auto-Precharge
-                        addr_reg(9 downto 0) <= saved_addr(9 downto 0);
-                        addr_reg(10) <= '1'; -- Auto-Precharge!
-
-                        -- DQM en lecturas controla el OUTPUT ENABLE de la SDRAM,
-                        -- no la mascara de bytes. Si lo ponemos a '1' la SDRAM
-                        -- deja DQ en alta impedancia y leeriamos 0xFFFF. Para
-                        -- READ siempre 00: la CPU ya extrae el byte/half en WB.
+                        cmd_reg              <= CMD_READ;
+                        ba_reg               <= saved_addr(24 downto 23);
+                        addr_reg(9 downto 0) <= saved_addr(9 downto 0); -- columna
+                        addr_reg(10)         <= '1';                    -- Auto-Precharge
+                        -- En READ, DQM controla el output-enable de la SDRAM.
+                        -- Si lo levantamos, la SDRAM deja DQ en alta impedancia
+                        -- y leeriamos 0xFFFF. SIEMPRE 00 en read: la extraccion
+                        -- de byte/half la hace la etapa WB de la CPU.
                         dqm_reg <= "00";
-
-                        state <= S_CAS1;
+                        state   <= S_CAS1;
 
                     when S_CAS1 =>
-                        -- Primer ciclo de espera CAS
                         state <= S_CAS2;
 
                     when S_CAS2 =>
-                        -- T2.0 a T3.0
                         state <= S_CAS3;
 
                     when S_CAS3 =>
-                        -- En T3.5 la SDRAM acaba de salir de alta impedancia
-                        -- (tAC ~5.5ns todavia no ha vencido), asi que el bus
-                        -- esta en transicion. Capturar ahora da metaestabilidad
-                        -- (se observaba 0xAAAA = patron alternante). Esperamos
-                        -- un flanco mas.
+                        -- En este flanco la SDRAM acaba de empezar a manejar
+                        -- DQ (tAC todavia no ha vencido). No capturamos aqui.
                         state <= S_CAS4;
 
                     when S_CAS4 =>
-                        -- En T4.5 (falling_edge) el dato ya esta estable
-                        -- (5ns de margen tras tAC). 'sdram_dq_falling' lo
-                        -- atrapo. Ahora en T5.0 lo guardamos.
+                        -- Ahora el dato lleva un ciclo entero estable y
+                        -- 'sdram_dq_falling' lo capturo en el ultimo flanco
+                        -- de bajada con ~5 ns de margen sobre tAC.
                         O_data_out <= sdram_dq_falling;
                         O_valid    <= '1';
-
-                        -- El Auto-Precharge ya esta cerrando la fila.
-                        -- Pasamos por RECOVERY (busy=0 pero sin aceptar
-                        -- nuevas peticiones) para que la CPU avance fuera
-                        -- del stall antes de que volvamos a mirar rd_en/wr_en.
                         state      <= S_RECOVERY;
 
+                    -- ============================================
+                    -- ESCRITURA + Auto-Precharge
+                    -- ============================================
                     when S_WRITE_CMD =>
-                        cmd_reg <= CMD_WRITE;
-                        ba_reg  <= saved_addr(24 downto 23);
-                        -- Columna y A10=1 para Auto-Precharge
+                        cmd_reg              <= CMD_WRITE;
+                        ba_reg               <= saved_addr(24 downto 23);
                         addr_reg(9 downto 0) <= saved_addr(9 downto 0);
-                        addr_reg(10) <= '1';
-                        
-                        -- Sacamos los datos y mascara de bytes
-                        dq_out_en <= '1';
-                        dq_out    <= saved_data;
-                        dqm_reg(1)<= not saved_byte(1);
-                        dqm_reg(0)<= not saved_byte(0);
-                        
-                        state <= S_TWR1;
+                        addr_reg(10)         <= '1';
+                        -- En WRITE, DQM es mascara de byte (1 = no escribir
+                        -- ese byte). I_byte_en es activo en alto, asi que
+                        -- invertimos.
+                        dqm_reg(1) <= not saved_byte(1);
+                        dqm_reg(0) <= not saved_byte(0);
+                        dq_out_en  <= '1';
+                        dq_out     <= saved_data;
+                        state      <= S_TWR1;
 
                     when S_TWR1 =>
-                        -- Write Recovery (tDPL/tWR). Mantenemos DQ por seguridad si hiciera falta
+                        -- Mantenemos un ciclo mas el dato y comando estables
+                        -- para no violar tDPL.
                         state <= S_TWR2;
 
                     when S_TWR2 =>
-                        -- Fin de Write Recovery. Comienza Auto-Precharge internamente
                         wait_timer <= 0;
                         state      <= S_PRECHARGE_WAIT;
 
                     when S_PRECHARGE_WAIT =>
-                        -- tRP = 15ns (1 ciclo). Al acabar pasamos por
-                        -- RECOVERY antes de aceptar la siguiente peticion.
+                        -- Auto-Precharge interno de la SDRAM acaba aqui.
                         if wait_timer < T_RP - 1 then
                             wait_timer <= wait_timer + 1;
                         else
                             state <= S_RECOVERY;
                         end if;
 
+                    -- ============================================
+                    -- RECOVERY: el corazon del fix
+                    --
+                    -- Durante este ciclo busy=0 (asignado combinacionalmente
+                    -- arriba), asi que la CPU sale del stall y avanza ex_mem
+                    -- en el flanco siguiente. La FSM aqui no mira rd_en/wr_en
+                    -- ni los timers de refresh: simplemente transiciona a
+                    -- IDLE, donde ya veremos las senales nuevas de la CPU.
+                    -- ============================================
                     when S_RECOVERY =>
-                        -- Ciclo intencional con busy=0 pero sin chequear
-                        -- rd_en/wr_en. Permite a la CPU advance ex_mem
-                        -- fuera del stall antes de que aceptemos la siguiente
-                        -- transaccion. Critico para secuencias SH;LHU back-
-                        -- to-back: sin esto re-disparabamos con el contexto
-                        -- del SH justo cuando la CPU avanzaba al LHU.
                         state <= S_IDLE;
 
                     when others =>
