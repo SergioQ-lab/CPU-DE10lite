@@ -111,7 +111,13 @@ architecture Behavioral of dcache is
 
     attribute ramstyle : string;
     attribute ramstyle of cache_valid : signal is "logic";
-    attribute ramstyle of cache_tag   : signal is "M9K";
+    -- cache_tag forzado a registros: con BRAM dual-port la semantica de
+    -- read-during-write es "DON'T CARE" en Quartus altsyncram inferido, lo
+    -- que provoca que el re-lookup tras un fill lea el tag viejo, dispare
+    -- otro miss, y entremos en un loop fill->re-lookup-miss->fill que
+    -- infla los counters a millones (observado: ~14M misses por 1024 LWs).
+    -- 256 entradas x 20 bits = 5120 FFs, perfectamente asumible.
+    attribute ramstyle of cache_tag   : signal is "logic";
     attribute ramstyle of cache_w0    : signal is "M9K";
     attribute ramstyle of cache_w1    : signal is "M9K";
     attribute ramstyle of cache_w2    : signal is "M9K";
