@@ -6,54 +6,43 @@
 -- ============================================================================
 -- PARAMETROS
 -- ============================================================================
---   Tamano total      : 4 KB (1024 entradas de 32 bits)
+--   Tamano total      : 4 KB (256 lineas de 16 bytes)
 --   Topologia         : Direct-mapped
---   Tamano de linea   : 4 bytes (1 palabra de 32 bits)
+--   Tamano de linea   : 16 bytes = 4 palabras de 32 bits
 --   Politica escritura: Write-through, no-write-allocate
---   Politica lectura  : Read-allocate (al miss se cachea)
+--   Politica lectura  : Read-allocate (al miss se cachea la linea entera)
 --
 -- ============================================================================
 -- ADDRESS DECODING (direccion byte de 32 bits)
 -- ============================================================================
---   [31:12] = tag        (20 bits)
---   [11: 2] = index      (10 bits -> 1024 entradas)
+--   [31:12] = tag         (20 bits)
+--   [11: 4] = index       (8 bits -> 256 lineas)
+--   [ 3: 2] = word offset (2 bits -> 4 palabras / linea)
 --   [ 1: 0] = byte offset (lo gestiona la CPU en WB)
+--
+-- ============================================================================
+-- RELLENO POR BURST
+-- ============================================================================
+-- En un miss de lectura, lanzamos UN burst de 8 halfwords al SDRAM (BL=8).
+-- Eso son 16 bytes = una linea completa. Los acumulamos en refill_buf y
+-- al recibir I_mem_done escribimos la linea entera al cache.
+--
+-- Coste aproximado:
+--   Hit  (read)     : 2 ciclos
+--   Miss (read)     : ACTIVATE(1) + TRCD(1) + READ_CMD(1) + CAS(3) + 8 burst
+--                     + RECOVERY(1) = ~15 ciclos, traen 4 palabras de golpe
+--                     -> ~4 ciclos efectivos por palabra (vs ~26 antes).
+--   Write           : ~26 ciclos (no cambia, write-through single)
 --
 -- ============================================================================
 -- PROTOCOLO DE HANDSHAKE
 -- ============================================================================
--- La CPU presenta I_req (= sel_sdram desde el SoC) + I_we + I_addr + I_be + ...
--- El cache responde con O_rdata (lectura) y O_busy (stallea la CPU mientras
--- procesa).
+-- O_busy combinacional. '0' solo en IDLE-sin-peticion, LOOKUP-hit-read, o
+-- RECOVERY. Garantiza que la CPU no avance por delante del cache.
 --
--- O_busy es combinacional para evitar la race condition clasica:
---   '0' SOLO cuando estamos en IDLE sin peticion, o cuando estamos en
---   LOOKUP y hemos resuelto un HIT de lectura. En cualquier otro caso '1'.
---
--- ============================================================================
--- ESTRATEGIA EN MISSES
--- ============================================================================
--- En un miss de lectura: pedimos al SDRAM dos halfwords (low + high), los
--- combinamos en una palabra de 32 bits y la ESCRIBIMOS en el cache. Luego
--- volvemos a IDLE. Como la CPU sigue stalleada con la misma instruccion en
--- ex_mem, en el siguiente ciclo presenta la misma peticion y el cache hace
--- otro LOOKUP -- esta vez con hit, devolviendo el dato recien cacheado.
---
--- Esto evita la complejidad del read-during-write del BRAM en el ciclo del
--- propio fill: por el doble lookup, cuando re-leemos el dato ya esta
--- propagado en el BRAM (un ciclo entero ha pasado).
---
--- Coste: 2 lookups por miss en lugar de 1. Los contadores marcan tanto la
--- miss inicial como el hit del re-lookup; en codigo de usuario esto se
--- traduce en miss+1 y hit+1 por cada miss real. No es enganoso, pero hay
--- que tener esto en cuenta al interpretar las cifras.
---
--- ============================================================================
--- INTERFAZ AL SDRAM
--- ============================================================================
--- Identica al SoC: addr 25-bit + data 16-bit + rd/wr_en + busy + valid.
--- El cache hace de capa de abstraccion 32<->16: cada acceso de 32 bits
--- corresponde a dos transacciones de 16 bits al controlador.
+-- En los WAIT mantenemos rd_en/wr_en/addr altos hasta que I_mem_done pulse,
+-- asi sobrevivimos a refreshes intercalados de la SDRAM sin perder la
+-- peticion.
 --------------------------------------------------------------------------------
 
 library IEEE;
@@ -62,8 +51,9 @@ use IEEE.NUMERIC_STD.all;
 
 entity dcache is
     generic (
-        INDEX_BITS : integer := 10;   -- 2^10 = 1024 entradas
-        TAG_BITS   : integer := 20    -- tag de 20 bits
+        INDEX_BITS  : integer := 8;    -- 2^8 = 256 lineas
+        TAG_BITS    : integer := 20;
+        LINE_WORDS  : integer := 4     -- 4 palabras de 32 bits por linea
     );
     port (
         I_clk        : in  std_logic;
@@ -78,7 +68,7 @@ entity dcache is
         I_be         : in  std_logic_vector(3 downto 0);
         O_busy       : out std_logic;
 
-        -- Lado SDRAM controller (16-bit)
+        -- Lado SDRAM controller (16-bit). BL=8 en lecturas.
         O_mem_addr   : out std_logic_vector(24 downto 0);
         O_mem_wdata  : out std_logic_vector(15 downto 0);
         I_mem_rdata  : in  std_logic_vector(15 downto 0);
@@ -86,8 +76,8 @@ entity dcache is
         O_mem_wr_en  : out std_logic;
         O_mem_be     : out std_logic_vector(1 downto 0);
         I_mem_busy   : in  std_logic;
-        I_mem_valid  : in  std_logic;
-        I_mem_done   : in  std_logic;
+        I_mem_valid  : in  std_logic;    -- pulso por cada halfword del burst
+        I_mem_done   : in  std_logic;    -- pulso unico al final de la transaccion
 
         -- Contadores
         O_hit_count  : out std_logic_vector(31 downto 0);
@@ -97,52 +87,48 @@ end entity dcache;
 
 architecture Behavioral of dcache is
 
-    constant N_LINES : integer := 2**INDEX_BITS;
+    constant N_LINES      : integer := 2**INDEX_BITS;
+    constant LINE_BITS    : integer := LINE_WORDS * 32;     -- 128
 
     ------------------------------------------------------------------------
     -- Storage
     ------------------------------------------------------------------------
     type valid_array_t is array (0 to N_LINES-1) of std_logic;
     type tag_array_t   is array (0 to N_LINES-1) of std_logic_vector(TAG_BITS-1 downto 0);
-    type data_array_t  is array (0 to N_LINES-1) of std_logic_vector(31 downto 0);
+    type line_array_t  is array (0 to N_LINES-1) of std_logic_vector(LINE_BITS-1 downto 0);
 
     signal cache_valid : valid_array_t := (others => '0');
     signal cache_tag   : tag_array_t;
-    signal cache_data  : data_array_t;
+    signal cache_line  : line_array_t;
 
     attribute ramstyle : string;
-    -- valid es pequeno -> registros (lectura combinacional inmediata).
     attribute ramstyle of cache_valid : signal is "logic";
-    -- tag y data van a M9K.
-    attribute ramstyle of cache_tag  : signal is "M9K";
-    attribute ramstyle of cache_data : signal is "M9K";
+    attribute ramstyle of cache_tag   : signal is "M9K";
+    attribute ramstyle of cache_line  : signal is "M9K";
 
     ------------------------------------------------------------------------
     -- Salidas registradas de la BRAM
     ------------------------------------------------------------------------
-    signal cache_d_r : std_logic_vector(31 downto 0);
-    signal cache_t_r : std_logic_vector(TAG_BITS-1 downto 0);
     signal cache_v_r : std_logic;
+    signal cache_t_r : std_logic_vector(TAG_BITS-1 downto 0);
+    signal cache_l_r : std_logic_vector(LINE_BITS-1 downto 0);
 
     ------------------------------------------------------------------------
-    -- Indices y tag de la peticion actual
+    -- Slices de la direccion
     ------------------------------------------------------------------------
-    signal idx_in    : integer range 0 to N_LINES-1;
-    signal tag_in    : std_logic_vector(TAG_BITS-1 downto 0);
+    signal idx_in : integer range 0 to N_LINES-1;
 
     ------------------------------------------------------------------------
-    -- Estados del FSM
+    -- FSM
     ------------------------------------------------------------------------
     type state_t is (
-        S_IDLE,        -- esperando peticion
-        S_LOOKUP,      -- BRAM acaba de entregar, decidimos hit/miss
-        S_FILL_REQ,    -- arrancar peticion 16-bit a SDRAM
-        S_FILL_WAIT,   -- esperando valid pulse
-        S_WR_REQ,      -- arrancar escritura 16-bit a SDRAM
-        S_WR_WAIT,     -- esperando fin de escritura SDRAM
-        S_RECOVERY     -- ciclo de gracia post-write: busy=0 pero no aceptamos
-                       -- peticiones, para que la CPU avance ex_mem fuera del
-                       -- stall antes de que volvamos a mirar I_req
+        S_IDLE,
+        S_LOOKUP,
+        S_FILL_REQ,    -- iniciar burst read al SDRAM
+        S_FILL_WAIT,   -- acumular 8 halfwords del burst
+        S_WR_REQ,      -- iniciar write 16-bit al SDRAM (single)
+        S_WR_WAIT,
+        S_RECOVERY
     );
     signal state : state_t := S_IDLE;
 
@@ -154,19 +140,12 @@ architecture Behavioral of dcache is
     signal pend_be    : std_logic_vector(3 downto 0);
     signal pend_is_wr : std_logic;
 
-    -- Latch del halfword bajo mientras pedimos el alto
-    signal refill_lo : std_logic_vector(15 downto 0);
+    -- Buffer de relleno: 8 halfwords del burst, accumulando en orden
+    signal refill_buf : std_logic_vector(LINE_BITS-1 downto 0);
+    signal refill_cnt : integer range 0 to 8;
 
-    -- 0 = procesar low halfword, 1 = procesar high halfword
+    -- Para writes: 0 = procesar low halfword, 1 = procesar high halfword
     signal halfword_idx : std_logic;
-
-    -- Estado del handshake con la SDRAM
-    signal mem_in_flight : std_logic;
-
-    -- Flag: el proximo LOOKUP es el re-lookup que sigue a un fill.
-    -- Lo usamos para NO contar ese hit (es del mismo acceso que ya conto
-    -- como miss). Asi los contadores reflejan accesos reales.
-    signal post_fill : std_logic := '0';
 
     ------------------------------------------------------------------------
     -- Hit combinacional valido cuando estamos en LOOKUP
@@ -176,7 +155,14 @@ architecture Behavioral of dcache is
     ------------------------------------------------------------------------
     -- Salidas combinacionales
     ------------------------------------------------------------------------
-    signal busy_int  : std_logic;
+    signal busy_int    : std_logic;
+    signal word_sel    : std_logic_vector(1 downto 0);
+    signal cache_d_r   : std_logic_vector(31 downto 0);
+
+    ------------------------------------------------------------------------
+    -- Flag para no contar el hit del re-lookup post-fill como acceso real
+    ------------------------------------------------------------------------
+    signal post_fill : std_logic := '0';
 
     ------------------------------------------------------------------------
     -- Contadores
@@ -189,67 +175,64 @@ begin
     ---------------------------------------------------------------------------
     -- Decodificacion combinacional del address
     ---------------------------------------------------------------------------
-    idx_in <= to_integer(unsigned(I_addr(INDEX_BITS + 1 downto 2)));
-    tag_in <= I_addr(31 downto INDEX_BITS + 2);
+    -- I_addr[INDEX_BITS+3 : 4] = idx (8 bits para 256 lineas).
+    -- I_addr[3:2]              = word_sel (4 palabras/linea).
+    idx_in <= to_integer(unsigned(I_addr(INDEX_BITS + 3 downto 4)));
+
+    -- word_sel viene de pend_addr (registrado en S_IDLE->S_LOOKUP).
+    -- Asi el mux de cache_d_r es estable a lo largo de la transaccion en
+    -- curso, independiente de la I_addr que la CPU presente despues.
+    word_sel <= pend_addr(3 downto 2);
 
     ---------------------------------------------------------------------------
-    -- Lectura de las memorias del cache. Salida registrada (1 ciclo latencia).
+    -- Lectura sincrona del cache (BRAM con salida registrada)
     ---------------------------------------------------------------------------
     cache_read_proc : process (I_clk)
     begin
         if rising_edge(I_clk) then
-            cache_d_r <= cache_data(idx_in);
-            cache_t_r <= cache_tag(idx_in);
             cache_v_r <= cache_valid(idx_in);
+            cache_t_r <= cache_tag(idx_in);
+            cache_l_r <= cache_line(idx_in);
         end if;
     end process;
 
     ---------------------------------------------------------------------------
-    -- Hit/miss combinacional usando los valores registrados de BRAM
-    -- y el tag de la peticion latcheada en pend_addr.
+    -- Hit detection y mux de palabra
     ---------------------------------------------------------------------------
-    lookup_hit <= '1' when (cache_v_r = '1' and cache_t_r = pend_addr(31 downto INDEX_BITS + 2))
+    lookup_hit <= '1' when (cache_v_r = '1' and cache_t_r = pend_addr(31 downto INDEX_BITS + 4))
                   else '0';
 
+    cache_d_r <= cache_l_r( 31 downto   0) when word_sel = "00" else
+                 cache_l_r( 63 downto  32) when word_sel = "01" else
+                 cache_l_r( 95 downto  64) when word_sel = "10" else
+                 cache_l_r(127 downto  96);
+
     ---------------------------------------------------------------------------
-    -- O_busy combinacional. La CPU se stallea siempre que estemos haciendo
-    -- algo que no sea "IDLE-sin-peticion" o "LOOKUP-resuelto-hit-read".
-    -- Esto incluye el ciclo IDLE-con-peticion-pendiente, igual que en el
-    -- SDRAM: asi la CPU no avanza por delante de nosotros.
+    -- O_busy combinacional. Mismo principio que antes: '0' solo en RECOVERY
+    -- o IDLE-sin-peticion o LOOKUP-hit-read.
     ---------------------------------------------------------------------------
-    -- busy=0 en:
-    --   - IDLE sin peticion (sistema en reposo)
-    --   - LOOKUP con hit-read resuelto en este ciclo (la CPU consumira
-    --     cache_d_r y avanzara)
-    --   - RECOVERY (ciclo de gracia post-write: la CPU avanza ex_mem y en
-    --     el proximo ciclo veremos una peticion nueva, no la vieja)
     busy_int <= '0' when state = S_RECOVERY else
                 '0' when (state = S_IDLE   and I_req = '0') else
                 '0' when (state = S_LOOKUP and lookup_hit = '1' and pend_is_wr = '0') else
                 '1';
     O_busy   <= busy_int;
 
-    ---------------------------------------------------------------------------
-    -- O_rdata: cache_d_r en cualquier ciclo donde la CPU consume. En LOOKUP
-    -- el dato es directamente el del BRAM; en IDLE (post-fill), tambien
-    -- (ha pasado un ciclo, el write se ha propagado y el re-lookup leera
-    -- el valor recien escrito).
-    ---------------------------------------------------------------------------
     O_rdata <= cache_d_r;
 
     ---------------------------------------------------------------------------
     -- FSM principal
     ---------------------------------------------------------------------------
     fsm_proc : process (I_clk)
-        variable sd_addr_word : std_logic_vector(24 downto 0);
-        variable update_word  : std_logic_vector(31 downto 0);
         variable idx_int      : integer range 0 to N_LINES-1;
+        variable line_aligned : std_logic_vector(24 downto 0);
+        variable update_line  : std_logic_vector(LINE_BITS-1 downto 0);
+        variable base_bit     : integer range 0 to LINE_BITS - 32;
     begin
         if rising_edge(I_clk) then
             if I_reset = '1' then
                 state          <= S_IDLE;
                 halfword_idx   <= '0';
-                mem_in_flight  <= '0';
+                refill_cnt     <= 0;
                 post_fill      <= '0';
                 hit_count_reg  <= (others => '0');
                 miss_count_reg <= (others => '0');
@@ -257,13 +240,12 @@ begin
                 pend_wdata     <= (others => '0');
                 pend_be        <= (others => '0');
                 pend_is_wr     <= '0';
-                refill_lo      <= (others => '0');
+                refill_buf     <= (others => '0');
                 O_mem_rd_en    <= '0';
                 O_mem_wr_en    <= '0';
                 O_mem_addr     <= (others => '0');
                 O_mem_wdata    <= (others => '0');
                 O_mem_be       <= "00";
-                -- Limpiar validez del cache (cache frio en reset)
                 for i in 0 to N_LINES-1 loop
                     cache_valid(i) <= '0';
                 end loop;
@@ -272,8 +254,16 @@ begin
                 O_mem_rd_en <= '0';
                 O_mem_wr_en <= '0';
 
+                -- Indice de la linea de la peticion actual.
+                idx_int := to_integer(unsigned(pend_addr(INDEX_BITS+3 downto 4)));
+
+                -- Direccion 25-bit aligned a la linea (8-halfword aligned).
+                -- pend_addr en bytes; SDRAM addr en halfwords; bit[1]=0 alinea
+                -- a halfword, bit[3:1]=0 alinea a linea de 16 bytes.
+                line_aligned := pend_addr(25 downto 4) & "000";
+
                 case state is
-                    -- ----------------------------------------------------
+                    -- --------------------------------------------------------
                     when S_IDLE =>
                         if I_req = '1' then
                             pend_addr  <= I_addr;
@@ -283,101 +273,95 @@ begin
                             state      <= S_LOOKUP;
                         end if;
 
-                    -- ----------------------------------------------------
+                    -- --------------------------------------------------------
                     when S_LOOKUP =>
-                        idx_int := to_integer(unsigned(pend_addr(INDEX_BITS+1 downto 2)));
                         if lookup_hit = '1' then
-                            -- Solo contamos hit si NO es el re-lookup que sigue
-                            -- inmediatamente a un fill (esos pertenecen al mismo
-                            -- acceso que ya conto como miss).
                             if post_fill = '0' then
                                 hit_count_reg <= hit_count_reg + 1;
                             end if;
                             post_fill <= '0';
                             if pend_is_wr = '0' then
-                                -- HIT-READ. Volvemos a IDLE; la CPU consumira
-                                -- cache_d_r combinacionalmente en este ciclo.
+                                -- HIT-READ: el mux de cache_d_r ya tiene el
+                                -- dato. Volvemos a IDLE.
                                 state <= S_IDLE;
                             else
-                                -- HIT-WRITE. Actualizamos el cache con los
-                                -- bytes seleccionados y arrancamos write-through.
-                                update_word := cache_d_r;
-                                if pend_be(0) = '1' then update_word( 7 downto  0) := pend_wdata( 7 downto  0); end if;
-                                if pend_be(1) = '1' then update_word(15 downto  8) := pend_wdata(15 downto  8); end if;
-                                if pend_be(2) = '1' then update_word(23 downto 16) := pend_wdata(23 downto 16); end if;
-                                if pend_be(3) = '1' then update_word(31 downto 24) := pend_wdata(31 downto 24); end if;
-                                cache_data(idx_int) <= update_word;
-                                halfword_idx  <= '0';
-                                mem_in_flight <= '0';
-                                state         <= S_WR_REQ;
+                                -- HIT-WRITE: actualizamos los bytes corres-
+                                -- pondientes dentro de la linea cacheada y
+                                -- arrancamos write-through.
+                                update_line := cache_l_r;
+                                case word_sel is
+                                    when "00" => base_bit := 0;
+                                    when "01" => base_bit := 32;
+                                    when "10" => base_bit := 64;
+                                    when others => base_bit := 96;
+                                end case;
+                                for b in 0 to 3 loop
+                                    if pend_be(b) = '1' then
+                                        update_line(base_bit + 8*b + 7 downto base_bit + 8*b)
+                                            := pend_wdata(8*b + 7 downto 8*b);
+                                    end if;
+                                end loop;
+                                cache_line(idx_int) <= update_line;
+                                halfword_idx <= '0';
+                                state        <= S_WR_REQ;
                             end if;
                         else
                             -- MISS
                             miss_count_reg <= miss_count_reg + 1;
                             halfword_idx   <= '0';
-                            mem_in_flight  <= '0';
+                            refill_cnt     <= 0;
                             if pend_is_wr = '0' then
                                 state <= S_FILL_REQ;
                             else
-                                -- Write miss: write-through sin allocate.
                                 state <= S_WR_REQ;
                             end if;
                         end if;
 
-                    -- ----------------------------------------------------
-                    -- Miss de lectura
-                    --
-                    -- Mantenemos rd_en y addr ALTOS hasta que el SDRAM
-                    -- pulse I_mem_done. Esto inmuniza contra:
-                    --   - SDRAM ocupada con auto-refresh cuando intentamos
-                    --     iniciar (sin esto, el refresh terminaria, vol-
-                    --     veriamos a IDLE con busy=0 y creeriamos que la
-                    --     transaccion completo cuando ni siquiera empezo).
-                    --   - INIT de la SDRAM aun en curso al primer acceso.
-                    -- ----------------------------------------------------
+                    -- --------------------------------------------------------
+                    -- Miss de lectura: lanzar burst de 8 halfwords al SDRAM
+                    -- --------------------------------------------------------
                     when S_FILL_REQ =>
-                        sd_addr_word := pend_addr(25 downto 2) & halfword_idx;
-                        O_mem_addr   <= sd_addr_word;
+                        O_mem_addr   <= line_aligned;
                         O_mem_rd_en  <= '1';
                         O_mem_be     <= "11";
                         state        <= S_FILL_WAIT;
 
                     when S_FILL_WAIT =>
-                        idx_int      := to_integer(unsigned(pend_addr(INDEX_BITS+1 downto 2)));
-                        sd_addr_word := pend_addr(25 downto 2) & halfword_idx;
-                        if I_mem_done = '0' then
-                            -- Aun no completado: mantener petitcion estable.
-                            O_mem_addr  <= sd_addr_word;
-                            O_mem_rd_en <= '1';
-                            O_mem_be    <= "11";
-                        else
-                            -- Transaccion completa. I_mem_rdata tiene el halfword.
-                            if halfword_idx = '0' then
-                                refill_lo    <= I_mem_rdata;
-                                halfword_idx <= '1';
-                                state        <= S_FILL_REQ;
-                            else
-                                cache_data(idx_int)  <= I_mem_rdata & refill_lo;
-                                cache_tag(idx_int)   <= pend_addr(31 downto INDEX_BITS+2);
-                                cache_valid(idx_int) <= '1';
-                                post_fill            <= '1';
-                                state                <= S_IDLE;
-                            end if;
+                        -- Mantener peticion estable hasta que el burst complete
+                        O_mem_addr  <= line_aligned;
+                        O_mem_rd_en <= '1';
+                        O_mem_be    <= "11";
+
+                        -- Cada I_mem_valid es un halfword del burst.
+                        if I_mem_valid = '1' and refill_cnt < 8 then
+                            refill_buf(refill_cnt*16 + 15 downto refill_cnt*16) <= I_mem_rdata;
+                            refill_cnt <= refill_cnt + 1;
                         end if;
 
-                    -- ----------------------------------------------------
-                    -- Write-through (1 o 2 halfwords)
-                    --
-                    -- Misma estrategia: mantener wr_en/addr/wdata/be altos
-                    -- hasta I_mem_done.
-                    -- ----------------------------------------------------
+                        -- I_mem_done indica fin del burst entero.
+                        if I_mem_done = '1' then
+                            -- En el mismo ciclo viene el ultimo halfword en
+                            -- I_mem_rdata (el valid pulsa simultaneamente).
+                            -- Ensamblamos la linea final.
+                            update_line := refill_buf;
+                            if refill_cnt < 8 then
+                                update_line(refill_cnt*16 + 15 downto refill_cnt*16) := I_mem_rdata;
+                            end if;
+                            cache_line(idx_int)  <= update_line;
+                            cache_tag(idx_int)   <= pend_addr(31 downto INDEX_BITS+4);
+                            cache_valid(idx_int) <= '1';
+                            post_fill            <= '1';
+                            state                <= S_IDLE;
+                        end if;
+
+                    -- --------------------------------------------------------
+                    -- Write-through (SDRAM en modo single, 1 halfword por txn)
+                    -- --------------------------------------------------------
                     when S_WR_REQ =>
-                        sd_addr_word := pend_addr(25 downto 2) & halfword_idx;
-                        O_mem_addr   <= sd_addr_word;
+                        O_mem_addr <= pend_addr(25 downto 2) & halfword_idx;
 
                         if halfword_idx = '0' then
                             if pend_be(1 downto 0) = "00" then
-                                -- Nada que escribir en low half: saltar a high.
                                 halfword_idx <= '1';
                             else
                                 O_mem_wdata <= pend_wdata(15 downto 0);
@@ -397,21 +381,18 @@ begin
                         end if;
 
                     when S_WR_WAIT =>
-                        sd_addr_word := pend_addr(25 downto 2) & halfword_idx;
-                        if I_mem_done = '0' then
-                            -- Mantener peticion estable hasta que el SDRAM
-                            -- realmente complete la transaccion.
-                            O_mem_addr  <= sd_addr_word;
-                            O_mem_wr_en <= '1';
-                            if halfword_idx = '0' then
-                                O_mem_wdata <= pend_wdata(15 downto 0);
-                                O_mem_be    <= pend_be(1 downto 0);
-                            else
-                                O_mem_wdata <= pend_wdata(31 downto 16);
-                                O_mem_be    <= pend_be(3 downto 2);
-                            end if;
+                        -- Mantener peticion estable hasta I_mem_done.
+                        O_mem_addr  <= pend_addr(25 downto 2) & halfword_idx;
+                        O_mem_wr_en <= '1';
+                        if halfword_idx = '0' then
+                            O_mem_wdata <= pend_wdata(15 downto 0);
+                            O_mem_be    <= pend_be(1 downto 0);
                         else
-                            -- Done: transicionar.
+                            O_mem_wdata <= pend_wdata(31 downto 16);
+                            O_mem_be    <= pend_be(3 downto 2);
+                        end if;
+
+                        if I_mem_done = '1' then
                             if halfword_idx = '0' then
                                 halfword_idx <= '1';
                                 state        <= S_WR_REQ;

@@ -152,13 +152,16 @@ int main(void) {
     HEX_REG = 0x020000;
     phase_hit_rate();
 
-    /* Comprobamos que la primera pasada tuvo principalmente misses
-     * (>= 90% de los accesos) y la segunda pasada principalmente hits
-     * (>= 90% de los accesos). Con N=1024 esperamos:
-     *   primera: ~1024 misses, ~0 hits
-     *   segunda: ~1024 hits,   ~0 misses */
-    int ok_cold = (g_misses_before >= (N_WORDS * 9 / 10));
-    int ok_warm = (g_hits_after    >= (N_WORDS * 9 / 10));
+    /* Con linea de 16 bytes (4 palabras), un sweep secuencial de N_WORDS
+     * lecturas tiene 1 miss cada 4 lecturas (256 misses por N=1024) y 3
+     * hits entre fills. Una segunda pasada cae al 100% de hits.
+     *
+     * Cold pass (primera): esperamos ~256 misses, ~768 hits.
+     * Warm pass (segunda): esperamos 0 misses, ~1024 hits.
+     */
+    int ok_cold = (g_misses_before >= 200);          /* >= 200 -> miss rate cold */
+    int ok_warm = (g_misses_after  < 50)             /* < 50  -> warm caliente   */
+               && (g_hits_after    >= (N_WORDS * 9 / 10));
 
     if (!ok_cold || !ok_warm) {
         fill_screen(C_WARN);
