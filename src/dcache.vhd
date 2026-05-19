@@ -92,26 +92,40 @@ architecture Behavioral of dcache is
 
     ------------------------------------------------------------------------
     -- Storage
+    --
+    -- 4 BRAMs separados de 32 bits para las palabras de la linea (uno por
+    -- word offset). Cada uno se infiere como un M9K limpio. Quartus
+    -- tiene problemas con arrays de 128 bits para dual-port BRAM, asi que
+    -- los separamos a mano.
     ------------------------------------------------------------------------
     type valid_array_t is array (0 to N_LINES-1) of std_logic;
     type tag_array_t   is array (0 to N_LINES-1) of std_logic_vector(TAG_BITS-1 downto 0);
-    type line_array_t  is array (0 to N_LINES-1) of std_logic_vector(LINE_BITS-1 downto 0);
+    type word_array_t  is array (0 to N_LINES-1) of std_logic_vector(31 downto 0);
 
     signal cache_valid : valid_array_t := (others => '0');
     signal cache_tag   : tag_array_t;
-    signal cache_line  : line_array_t;
+    signal cache_w0    : word_array_t;
+    signal cache_w1    : word_array_t;
+    signal cache_w2    : word_array_t;
+    signal cache_w3    : word_array_t;
 
     attribute ramstyle : string;
     attribute ramstyle of cache_valid : signal is "logic";
     attribute ramstyle of cache_tag   : signal is "M9K";
-    attribute ramstyle of cache_line  : signal is "M9K";
+    attribute ramstyle of cache_w0    : signal is "M9K";
+    attribute ramstyle of cache_w1    : signal is "M9K";
+    attribute ramstyle of cache_w2    : signal is "M9K";
+    attribute ramstyle of cache_w3    : signal is "M9K";
 
     ------------------------------------------------------------------------
     -- Salidas registradas de la BRAM
     ------------------------------------------------------------------------
-    signal cache_v_r : std_logic;
-    signal cache_t_r : std_logic_vector(TAG_BITS-1 downto 0);
-    signal cache_l_r : std_logic_vector(LINE_BITS-1 downto 0);
+    signal cache_v_r  : std_logic;
+    signal cache_t_r  : std_logic_vector(TAG_BITS-1 downto 0);
+    signal cache_w0_r : std_logic_vector(31 downto 0);
+    signal cache_w1_r : std_logic_vector(31 downto 0);
+    signal cache_w2_r : std_logic_vector(31 downto 0);
+    signal cache_w3_r : std_logic_vector(31 downto 0);
 
     ------------------------------------------------------------------------
     -- Slices de la direccion
@@ -190,9 +204,12 @@ begin
     cache_read_proc : process (I_clk)
     begin
         if rising_edge(I_clk) then
-            cache_v_r <= cache_valid(idx_in);
-            cache_t_r <= cache_tag(idx_in);
-            cache_l_r <= cache_line(idx_in);
+            cache_v_r  <= cache_valid(idx_in);
+            cache_t_r  <= cache_tag(idx_in);
+            cache_w0_r <= cache_w0(idx_in);
+            cache_w1_r <= cache_w1(idx_in);
+            cache_w2_r <= cache_w2(idx_in);
+            cache_w3_r <= cache_w3(idx_in);
         end if;
     end process;
 
@@ -202,10 +219,10 @@ begin
     lookup_hit <= '1' when (cache_v_r = '1' and cache_t_r = pend_addr(31 downto INDEX_BITS + 4))
                   else '0';
 
-    cache_d_r <= cache_l_r( 31 downto   0) when word_sel = "00" else
-                 cache_l_r( 63 downto  32) when word_sel = "01" else
-                 cache_l_r( 95 downto  64) when word_sel = "10" else
-                 cache_l_r(127 downto  96);
+    cache_d_r <= cache_w0_r when word_sel = "00" else
+                 cache_w1_r when word_sel = "01" else
+                 cache_w2_r when word_sel = "10" else
+                 cache_w3_r;
 
     ---------------------------------------------------------------------------
     -- O_busy combinacional. Mismo principio que antes: '0' solo en RECOVERY
@@ -225,8 +242,11 @@ begin
     fsm_proc : process (I_clk)
         variable idx_int      : integer range 0 to N_LINES-1;
         variable line_aligned : std_logic_vector(24 downto 0);
-        variable update_line  : std_logic_vector(LINE_BITS-1 downto 0);
-        variable base_bit     : integer range 0 to LINE_BITS - 32;
+        variable update_word  : std_logic_vector(31 downto 0);
+        variable final_w0     : std_logic_vector(31 downto 0);
+        variable final_w1     : std_logic_vector(31 downto 0);
+        variable final_w2     : std_logic_vector(31 downto 0);
+        variable final_w3     : std_logic_vector(31 downto 0);
     begin
         if rising_edge(I_clk) then
             if I_reset = '1' then
@@ -286,22 +306,43 @@ begin
                                 state <= S_IDLE;
                             else
                                 -- HIT-WRITE: actualizamos los bytes corres-
-                                -- pondientes dentro de la linea cacheada y
-                                -- arrancamos write-through.
-                                update_line := cache_l_r;
+                                -- pondientes dentro de la palabra afectada y
+                                -- arrancamos write-through. Solo escribimos
+                                -- el BRAM correspondiente al word_sel.
                                 case word_sel is
-                                    when "00" => base_bit := 0;
-                                    when "01" => base_bit := 32;
-                                    when "10" => base_bit := 64;
-                                    when others => base_bit := 96;
+                                    when "00" =>
+                                        update_word := cache_w0_r;
+                                        for b in 0 to 3 loop
+                                            if pend_be(b) = '1' then
+                                                update_word(8*b + 7 downto 8*b) := pend_wdata(8*b + 7 downto 8*b);
+                                            end if;
+                                        end loop;
+                                        cache_w0(idx_int) <= update_word;
+                                    when "01" =>
+                                        update_word := cache_w1_r;
+                                        for b in 0 to 3 loop
+                                            if pend_be(b) = '1' then
+                                                update_word(8*b + 7 downto 8*b) := pend_wdata(8*b + 7 downto 8*b);
+                                            end if;
+                                        end loop;
+                                        cache_w1(idx_int) <= update_word;
+                                    when "10" =>
+                                        update_word := cache_w2_r;
+                                        for b in 0 to 3 loop
+                                            if pend_be(b) = '1' then
+                                                update_word(8*b + 7 downto 8*b) := pend_wdata(8*b + 7 downto 8*b);
+                                            end if;
+                                        end loop;
+                                        cache_w2(idx_int) <= update_word;
+                                    when others =>
+                                        update_word := cache_w3_r;
+                                        for b in 0 to 3 loop
+                                            if pend_be(b) = '1' then
+                                                update_word(8*b + 7 downto 8*b) := pend_wdata(8*b + 7 downto 8*b);
+                                            end if;
+                                        end loop;
+                                        cache_w3(idx_int) <= update_word;
                                 end case;
-                                for b in 0 to 3 loop
-                                    if pend_be(b) = '1' then
-                                        update_line(base_bit + 8*b + 7 downto base_bit + 8*b)
-                                            := pend_wdata(8*b + 7 downto 8*b);
-                                    end if;
-                                end loop;
-                                cache_line(idx_int) <= update_line;
                                 halfword_idx <= '0';
                                 state        <= S_WR_REQ;
                             end if;
@@ -342,12 +383,23 @@ begin
                         if I_mem_done = '1' then
                             -- En el mismo ciclo viene el ultimo halfword en
                             -- I_mem_rdata (el valid pulsa simultaneamente).
-                            -- Ensamblamos la linea final.
-                            update_line := refill_buf;
+                            -- Ensamblamos las 4 palabras de 32 bits desde los
+                            -- 8 halfwords. Asumiendo refill_cnt = 7 (vamos a
+                            -- recibir hw7 ahora), tenemos hw0..hw6 en
+                            -- refill_buf y hw7 en I_mem_rdata.
+                            final_w0 := refill_buf(31 downto 16) & refill_buf(15 downto 0);
+                            final_w1 := refill_buf(63 downto 48) & refill_buf(47 downto 32);
+                            final_w2 := refill_buf(95 downto 80) & refill_buf(79 downto 64);
+                            -- Para w3 (bits 111..96 son hw6, 127..112 seria hw7):
                             if refill_cnt < 8 then
-                                update_line(refill_cnt*16 + 15 downto refill_cnt*16) := I_mem_rdata;
+                                final_w3 := I_mem_rdata & refill_buf(111 downto 96);
+                            else
+                                final_w3 := refill_buf(127 downto 112) & refill_buf(111 downto 96);
                             end if;
-                            cache_line(idx_int)  <= update_line;
+                            cache_w0(idx_int)    <= final_w0;
+                            cache_w1(idx_int)    <= final_w1;
+                            cache_w2(idx_int)    <= final_w2;
+                            cache_w3(idx_int)    <= final_w3;
                             cache_tag(idx_int)   <= pend_addr(31 downto INDEX_BITS+4);
                             cache_valid(idx_int) <= '1';
                             post_fill            <= '1';
