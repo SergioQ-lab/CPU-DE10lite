@@ -143,12 +143,15 @@ architecture Behavioral of sdram_controller is
         S_ACTIVATE,
         S_TRCD,
 
-        -- Pipeline de lectura
+        -- Pipeline de lectura. Con BL=8 (mode register) tras CAS=2 ciclos
+        -- la SDRAM saca 8 halfwords consecutivos en 8 ciclos.
+        --   S_CAS1/2/3: wait + 1 extra cycle de margen tAC antes de capturar.
+        --   S_BURST_RD: capturamos 8 halfwords con un contador.
         S_READ_CMD,
         S_CAS1,
         S_CAS2,
         S_CAS3,
-        S_CAS4,
+        S_BURST_RD,
 
         -- Pipeline de escritura
         S_WRITE_CMD,
@@ -163,6 +166,7 @@ architecture Behavioral of sdram_controller is
     signal state      : fsm_state_t := S_INIT_WAIT;
     signal wait_timer : integer range 0 to 8191 := 0;
     signal ref_timer  : integer range 0 to 511  := 0;
+    signal burst_idx  : integer range 0 to 7    := 0;
 
     -- Salidas registradas hacia la SDRAM
     signal cmd_reg  : std_logic_vector(3 downto 0)  := CMD_NOP;
@@ -319,12 +323,12 @@ begin
                     when S_INIT_LMR =>
                         cmd_reg    <= CMD_LOAD_MODE;
                         -- Mode Register:
-                        --   [2:0] = burst length = 1 -> "000"
+                        --   [2:0] = burst length = 8 -> "011"
                         --   [ 3 ] = burst type   = sequential -> '0'
                         --   [6:4] = CAS latency  = 2 -> "010"
                         --   [8:7] = op. mode     = standard -> "00"
-                        --   [ 9 ] = write burst  = burst -> '0'
-                        addr_reg   <= "0000000100000";  -- A5=1, resto 0
+                        --   [ 9 ] = write burst  = SINGLE -> '1'   (escrituras de 1 halfword)
+                        addr_reg   <= "0001000100011";
                         wait_timer <= 0;
                         state      <= S_INIT_TMRD;
 
@@ -412,17 +416,25 @@ begin
 
                     when S_CAS3 =>
                         -- En este flanco la SDRAM acaba de empezar a manejar
-                        -- DQ (tAC todavia no ha vencido). No capturamos aqui.
-                        state <= S_CAS4;
+                        -- DQ del primer halfword (tAC todavia no ha vencido).
+                        -- Esperamos un ciclo mas y entramos al burst.
+                        burst_idx <= 0;
+                        state     <= S_BURST_RD;
 
-                    when S_CAS4 =>
-                        -- Ahora el dato lleva un ciclo entero estable y
-                        -- 'sdram_dq_falling' lo capturo en el ultimo flanco
-                        -- de bajada con ~5 ns de margen sobre tAC.
+                    when S_BURST_RD =>
+                        -- 8 halfwords consecutivos. En cada ciclo capturamos
+                        -- 'sdram_dq_falling' (que contiene el halfword cuyo
+                        -- flanco de bajada FPGA correspondiente fue el ultimo,
+                        -- con ~5 ns de margen sobre tAC).
                         O_data_out <= sdram_dq_falling;
                         O_valid    <= '1';
-                        O_done     <= '1';   -- pulso unificado: read completado
-                        state      <= S_RECOVERY;
+                        if burst_idx = 7 then
+                            -- Ultimo halfword del burst. Pulsamos done.
+                            O_done <= '1';
+                            state  <= S_RECOVERY;
+                        else
+                            burst_idx <= burst_idx + 1;
+                        end if;
 
                     -- ============================================
                     -- ESCRITURA + Auto-Precharge
