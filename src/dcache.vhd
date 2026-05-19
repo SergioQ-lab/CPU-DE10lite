@@ -138,7 +138,10 @@ architecture Behavioral of dcache is
         S_FILL_REQ,    -- arrancar peticion 16-bit a SDRAM
         S_FILL_WAIT,   -- esperando valid pulse
         S_WR_REQ,      -- arrancar escritura 16-bit a SDRAM
-        S_WR_WAIT      -- esperando fin de escritura SDRAM
+        S_WR_WAIT,     -- esperando fin de escritura SDRAM
+        S_RECOVERY     -- ciclo de gracia post-write: busy=0 pero no aceptamos
+                       -- peticiones, para que la CPU avance ex_mem fuera del
+                       -- stall antes de que volvamos a mirar I_req
     );
     signal state : state_t := S_IDLE;
 
@@ -213,7 +216,14 @@ begin
     -- Esto incluye el ciclo IDLE-con-peticion-pendiente, igual que en el
     -- SDRAM: asi la CPU no avanza por delante de nosotros.
     ---------------------------------------------------------------------------
-    busy_int <= '0' when (state = S_IDLE   and I_req = '0') else
+    -- busy=0 en:
+    --   - IDLE sin peticion (sistema en reposo)
+    --   - LOOKUP con hit-read resuelto en este ciclo (la CPU consumira
+    --     cache_d_r y avanzara)
+    --   - RECOVERY (ciclo de gracia post-write: la CPU avanza ex_mem y en
+    --     el proximo ciclo veremos una peticion nueva, no la vieja)
+    busy_int <= '0' when state = S_RECOVERY else
+                '0' when (state = S_IDLE   and I_req = '0') else
                 '0' when (state = S_LOOKUP and lookup_hit = '1' and pend_is_wr = '0') else
                 '1';
     O_busy   <= busy_int;
@@ -372,7 +382,10 @@ begin
                             end if;
                         else
                             if pend_be(3 downto 2) = "00" then
-                                state <= S_IDLE;
+                                -- Mismo motivo que la salida normal:
+                                -- pasamos por RECOVERY para no quedarnos
+                                -- atrapados en un loop con la CPU.
+                                state <= S_RECOVERY;
                             else
                                 O_mem_wdata <= pend_wdata(31 downto 16);
                                 O_mem_be    <= pend_be(3 downto 2);
@@ -391,9 +404,16 @@ begin
                                 halfword_idx <= '1';
                                 state        <= S_WR_REQ;
                             else
-                                state <= S_IDLE;
+                                -- Ambos halfwords escritos. Pasamos por
+                                -- RECOVERY (busy=0 sin aceptar peticiones)
+                                -- para que la CPU avance ex_mem antes de
+                                -- que volvamos a IDLE y miremos I_req.
+                                state <= S_RECOVERY;
                             end if;
                         end if;
+
+                    when S_RECOVERY =>
+                        state <= S_IDLE;
 
                     when others =>
                         state <= S_IDLE;
