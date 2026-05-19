@@ -87,6 +87,7 @@ entity dcache is
         O_mem_be     : out std_logic_vector(1 downto 0);
         I_mem_busy   : in  std_logic;
         I_mem_valid  : in  std_logic;
+        I_mem_done   : in  std_logic;
 
         -- Contadores
         O_hit_count  : out std_logic_vector(31 downto 0);
@@ -325,43 +326,50 @@ begin
 
                     -- ----------------------------------------------------
                     -- Miss de lectura
+                    --
+                    -- Mantenemos rd_en y addr ALTOS hasta que el SDRAM
+                    -- pulse I_mem_done. Esto inmuniza contra:
+                    --   - SDRAM ocupada con auto-refresh cuando intentamos
+                    --     iniciar (sin esto, el refresh terminaria, vol-
+                    --     veriamos a IDLE con busy=0 y creeriamos que la
+                    --     transaccion completo cuando ni siquiera empezo).
+                    --   - INIT de la SDRAM aun en curso al primer acceso.
                     -- ----------------------------------------------------
                     when S_FILL_REQ =>
                         sd_addr_word := pend_addr(25 downto 2) & halfword_idx;
                         O_mem_addr   <= sd_addr_word;
                         O_mem_rd_en  <= '1';
-                        O_mem_be     <= "11";  -- ignored on read by sdram (DQM=00 inside)
-                        if I_mem_busy = '1' then
-                            mem_in_flight <= '1';
-                            state         <= S_FILL_WAIT;
-                        end if;
+                        O_mem_be     <= "11";
+                        state        <= S_FILL_WAIT;
 
                     when S_FILL_WAIT =>
-                        idx_int := to_integer(unsigned(pend_addr(INDEX_BITS+1 downto 2)));
-                        if I_mem_valid = '1' then
+                        idx_int      := to_integer(unsigned(pend_addr(INDEX_BITS+1 downto 2)));
+                        sd_addr_word := pend_addr(25 downto 2) & halfword_idx;
+                        if I_mem_done = '0' then
+                            -- Aun no completado: mantener petitcion estable.
+                            O_mem_addr  <= sd_addr_word;
+                            O_mem_rd_en <= '1';
+                            O_mem_be    <= "11";
+                        else
+                            -- Transaccion completa. I_mem_rdata tiene el halfword.
                             if halfword_idx = '0' then
                                 refill_lo    <= I_mem_rdata;
                                 halfword_idx <= '1';
-                                mem_in_flight<= '0';
                                 state        <= S_FILL_REQ;
                             else
-                                -- High halfword recibido. Componemos la palabra
-                                -- de 32 bits y la escribimos al cache. Luego
-                                -- volvemos a IDLE: la CPU sigue stalleada, en
-                                -- el siguiente ciclo re-presentara la misma
-                                -- peticion y haremos un nuevo lookup -- esta
-                                -- vez hit, con cache_d_r mostrando el dato
-                                -- recien escrito.
                                 cache_data(idx_int)  <= I_mem_rdata & refill_lo;
                                 cache_tag(idx_int)   <= pend_addr(31 downto INDEX_BITS+2);
                                 cache_valid(idx_int) <= '1';
-                                post_fill            <= '1';  -- el proximo lookup es re-lookup
+                                post_fill            <= '1';
                                 state                <= S_IDLE;
                             end if;
                         end if;
 
                     -- ----------------------------------------------------
                     -- Write-through (1 o 2 halfwords)
+                    --
+                    -- Misma estrategia: mantener wr_en/addr/wdata/be altos
+                    -- hasta I_mem_done.
                     -- ----------------------------------------------------
                     when S_WR_REQ =>
                         sd_addr_word := pend_addr(25 downto 2) & halfword_idx;
@@ -375,39 +383,39 @@ begin
                                 O_mem_wdata <= pend_wdata(15 downto 0);
                                 O_mem_be    <= pend_be(1 downto 0);
                                 O_mem_wr_en <= '1';
-                                if I_mem_busy = '1' then
-                                    mem_in_flight <= '1';
-                                    state         <= S_WR_WAIT;
-                                end if;
+                                state       <= S_WR_WAIT;
                             end if;
                         else
                             if pend_be(3 downto 2) = "00" then
-                                -- Mismo motivo que la salida normal:
-                                -- pasamos por RECOVERY para no quedarnos
-                                -- atrapados en un loop con la CPU.
                                 state <= S_RECOVERY;
                             else
                                 O_mem_wdata <= pend_wdata(31 downto 16);
                                 O_mem_be    <= pend_be(3 downto 2);
                                 O_mem_wr_en <= '1';
-                                if I_mem_busy = '1' then
-                                    mem_in_flight <= '1';
-                                    state         <= S_WR_WAIT;
-                                end if;
+                                state       <= S_WR_WAIT;
                             end if;
                         end if;
 
                     when S_WR_WAIT =>
-                        if mem_in_flight = '1' and I_mem_busy = '0' then
-                            mem_in_flight <= '0';
+                        sd_addr_word := pend_addr(25 downto 2) & halfword_idx;
+                        if I_mem_done = '0' then
+                            -- Mantener peticion estable hasta que el SDRAM
+                            -- realmente complete la transaccion.
+                            O_mem_addr  <= sd_addr_word;
+                            O_mem_wr_en <= '1';
+                            if halfword_idx = '0' then
+                                O_mem_wdata <= pend_wdata(15 downto 0);
+                                O_mem_be    <= pend_be(1 downto 0);
+                            else
+                                O_mem_wdata <= pend_wdata(31 downto 16);
+                                O_mem_be    <= pend_be(3 downto 2);
+                            end if;
+                        else
+                            -- Done: transicionar.
                             if halfword_idx = '0' then
                                 halfword_idx <= '1';
                                 state        <= S_WR_REQ;
                             else
-                                -- Ambos halfwords escritos. Pasamos por
-                                -- RECOVERY (busy=0 sin aceptar peticiones)
-                                -- para que la CPU avance ex_mem antes de
-                                -- que volvamos a IDLE y miremos I_req.
                                 state <= S_RECOVERY;
                             end if;
                         end if;

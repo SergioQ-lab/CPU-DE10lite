@@ -79,7 +79,8 @@ entity sdram_controller is
         I_wr_en      : in    std_logic;
         I_byte_en    : in    std_logic_vector(1 downto 0);
         O_busy       : out   std_logic;
-        O_valid      : out   std_logic;
+        O_valid      : out   std_logic;  -- pulso: dato de lectura listo
+        O_done       : out   std_logic;  -- pulso: transaccion (read o write) completada
 
         -- Interfaz fisica SDRAM
         O_sdram_clk  : out   std_logic;
@@ -249,6 +250,7 @@ begin
                 dqm_reg    <= "11";
                 dq_out_en  <= '0';
                 O_valid    <= '0';
+                O_done     <= '0';
                 O_data_out <= (others => '0');
             else
                 -- Defaults cada ciclo. El case puede sobrescribir.
@@ -258,6 +260,7 @@ begin
                 dqm_reg   <= "00";
                 dq_out_en <= '0';
                 O_valid   <= '0';
+                O_done    <= '0';
 
                 -- Contador de refresco siempre corre (excepto durante el
                 -- power-up wait, antes de que la SDRAM este lista).
@@ -418,6 +421,7 @@ begin
                         -- de bajada con ~5 ns de margen sobre tAC.
                         O_data_out <= sdram_dq_falling;
                         O_valid    <= '1';
+                        O_done     <= '1';   -- pulso unificado: read completado
                         state      <= S_RECOVERY;
 
                     -- ============================================
@@ -451,7 +455,8 @@ begin
                         if wait_timer < T_RP - 1 then
                             wait_timer <= wait_timer + 1;
                         else
-                            state <= S_RECOVERY;
+                            O_done <= '1';   -- pulso unificado: write completado
+                            state  <= S_RECOVERY;
                         end if;
 
                     -- ============================================

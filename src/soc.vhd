@@ -173,6 +173,7 @@ architecture Behavioral of soc is
             I_byte_en    : in    std_logic_vector(1 downto 0);
             O_busy       : out   std_logic;
             O_valid      : out   std_logic;
+            O_done       : out   std_logic;
 
             O_sdram_clk  : out   std_logic;
             O_sdram_cke  : out   std_logic;
@@ -209,6 +210,7 @@ architecture Behavioral of soc is
             O_mem_be     : out std_logic_vector(1 downto 0);
             I_mem_busy   : in  std_logic;
             I_mem_valid  : in  std_logic;
+            I_mem_done   : in  std_logic;
             -- Counters
             O_hit_count  : out std_logic_vector(31 downto 0);
             O_miss_count : out std_logic_vector(31 downto 0)
@@ -250,6 +252,7 @@ architecture Behavioral of soc is
     signal sel_sdram  : std_logic;
     signal sdram_busy : std_logic;
     signal sdram_valid: std_logic;
+    signal sdram_done : std_logic;
     signal sdram_out16: std_logic_vector(15 downto 0);
 
     -- Senales entre cache y SDRAM controller (interno)
@@ -475,6 +478,7 @@ begin
         O_mem_be     => mem_be,
         I_mem_busy   => sdram_busy,
         I_mem_valid  => sdram_valid,
+        I_mem_done   => sdram_done,
         O_hit_count  => cache_hits,
         O_miss_count => cache_misses
     );
@@ -490,6 +494,7 @@ begin
         I_byte_en    => mem_be,
         O_busy       => sdram_busy,
         O_valid      => sdram_valid,
+        O_done       => sdram_done,
 
         O_sdram_clk  => O_sdram_clk,
         O_sdram_cke  => O_sdram_cke,
