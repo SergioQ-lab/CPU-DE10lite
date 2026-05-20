@@ -146,6 +146,58 @@ static const phase_fn phases[N_PHASES] = {
     phase_refresh,
 };
 
+/* ===== Carga del archivo WAD por UART (4.19MB para Shareware) ===== */
+#define DOOM_WAD_SIZE 4196020u
+
+static void load_wad_from_uart(void) {
+    /* Usamos uint16_t por seguridad si los byte enables fallan sin cache */
+    uint16_t *sdram_ptr = (uint16_t *)SDRAM_BASE;
+    uint32_t bytes_received = 0;
+    uint16_t temp_word = 0;
+
+    fb_clear(C_BG);
+    /* Dibujar marco de barra de progreso */
+    fb_hline(20, FB_HEIGHT/2 - 1, FB_WIDTH - 40, C_PEND);
+    fb_hline(20, FB_HEIGHT/2 + 10, FB_WIDTH - 40, C_PEND);
+    fb_vline(19, FB_HEIGHT/2 - 1, 12, C_PEND);
+    fb_vline(FB_WIDTH - 20, FB_HEIGHT/2 - 1, 12, C_PEND);
+
+    while(bytes_received < DOOM_WAD_SIZE) {
+        uint32_t rx_val = UART_RX_REG;
+        
+        if (rx_val & 0x100) { /* Bit 8 = data ready */
+            uint8_t b = (uint8_t)(rx_val & 0xFF);
+            
+            if ((bytes_received & 1) == 0) {
+                temp_word = b; /* LSB */
+            } else {
+                temp_word |= (b << 8); /* MSB */
+                *sdram_ptr++ = temp_word;
+            }
+            
+            bytes_received++;
+            
+            /* Actualizar barra de progreso y HEX cada 4096 bytes para no saturar */
+            if ((bytes_received & 0xFFF) == 0) {
+                int px = (bytes_received * (FB_WIDTH - 40)) / DOOM_WAD_SIZE;
+                fb_fill_rect(20, FB_HEIGHT/2, px, 10, C_BUSY); /* Barra azul */
+                HEX_REG = bytes_received;
+            }
+        }
+    }
+    
+    /* Byte impar suelto si ocurriera */
+    if (bytes_received & 1) {
+        *sdram_ptr = temp_word;
+    }
+    
+    fb_clear(C_OK); /* Pantalla verde de exito */
+    HEX_REG = 0x000D00U; /* "DOOM" en Displays */
+    while(1) {
+        /* Aqui en el futuro saltaremos a la direccion de arranque de DOOM */
+    }
+}
+
 int main(void) {
     fb_set_palette(0, 0x000);
     fb_set_palette(1, 0x0F0); /* verde     */
@@ -156,6 +208,11 @@ int main(void) {
     fb_clear(C_BG);
     LEDR = 0;
     HEX_REG = 0;
+
+    /* Si el switch 9 (mas a la izquierda) esta arriba, entra en modo descarga de DOOM */
+    if (SWITCHES & (1 << 9)) {
+        load_wad_from_uart();
+    }
 
     for (int p = 0; p < N_PHASES; p++) phase_status[p] = 0;
     draw_panel();

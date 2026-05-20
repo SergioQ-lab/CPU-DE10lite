@@ -26,6 +26,7 @@
 #define HEX_REG         REG(0x0C)   /* W: 24 bits = 6 nibbles (HEX5..HEX0) */
 #define UART_TX_REG     REG(0x10)   /* W: byte a transmitir */
 #define UART_STATUS     REG(0x14)   /* R: bit 0 = busy */
+#define UART_RX_REG     REG(0x60)   /* R: bits[7:0] = data, bit 8 = ready */
 #define TIMER           REG(0x18)   /* R: contador libre 32b @ 50 MHz */
 #define JOYSTICK        REG(0x1C)   /* R: bits[6:0] -> joystick UP, DOWN, LEFT, RIGHT, MID, SET, RST */
 
