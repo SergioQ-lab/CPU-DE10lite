@@ -52,7 +52,8 @@ entity mmio_bridge is
         O_pal_we    : out std_logic;
         O_pal_index : out std_logic_vector(3 downto 0);
         O_pal_data  : out std_logic_vector(11 downto 0);
-        I_joystick  : in  std_logic_vector(6 downto 0)
+        I_joystick  : in  std_logic_vector(6 downto 0);
+        I_uart_rx   : in  std_logic
     );
 end entity mmio_bridge;
 
@@ -72,6 +73,19 @@ architecture Behavioral of mmio_bridge is
         );
     end component;
 
+    component uart_rx is
+        generic (
+            BAUD_DIVIDER : integer := 434
+        );
+        port (
+            I_clk    : in  std_logic;
+            I_reset  : in  std_logic;
+            I_rx     : in  std_logic;
+            O_data   : out std_logic_vector(7 downto 0);
+            O_valid  : out std_logic
+        );
+    end component;
+
     component seven_seg is
         port (
             I_value : in  std_logic_vector(3 downto 0);
@@ -87,6 +101,11 @@ architecture Behavioral of mmio_bridge is
     signal uart_we   : std_logic := '0';
     signal uart_byte : std_logic_vector(7 downto 0) := (others => '0');
     signal uart_busy : std_logic;
+
+    signal uart_rx_valid : std_logic;
+    signal uart_rx_byte  : std_logic_vector(7 downto 0);
+    signal r_uart_rx_data  : std_logic_vector(7 downto 0) := (others => '0');
+    signal r_uart_rx_ready : std_logic := '0';
 
     -- Timer libre
     signal r_timer : unsigned(31 downto 0) := (others => '0');
@@ -117,6 +136,18 @@ begin
             I_data  => uart_byte,
             O_busy  => uart_busy,
             O_tx    => O_uart_tx
+        );
+
+    uart_rx_inst : uart_rx
+        generic map (
+            BAUD_DIVIDER => 434
+        )
+        port map (
+            I_clk   => I_clk,
+            I_reset => I_reset,
+            I_rx    => I_uart_rx,
+            O_data  => uart_rx_byte,
+            O_valid => uart_rx_valid
         );
 
     ---------------------------------------------------------------------------
@@ -150,8 +181,17 @@ begin
                 r_ledr  <= (others => '0');
                 r_hex   <= (others => '0');
                 r_timer <= (others => '0');
-            elsif I_sel = '1' and I_we = '1' then
-                case off is
+                r_uart_rx_ready <= '0';
+            else
+                if uart_rx_valid = '1' then
+                    r_uart_rx_data  <= uart_rx_byte;
+                    r_uart_rx_ready <= '1';
+                elsif I_sel = '1' and I_we = '0' and off = MMIO_OFF_UART_RX then
+                    r_uart_rx_ready <= '0';
+                end if;
+
+                if I_sel = '1' and I_we = '1' then
+                    case off is
                     when MMIO_OFF_LEDR =>
                         if I_be(0) = '1' then
                             r_ledr(7 downto 0) <= I_wdata(7 downto 0);
@@ -189,6 +229,7 @@ begin
                             pal_we_int    <= '1';
                         end if;
                 end case;
+                end if;
             end if;
         end if;
     end process;
@@ -208,6 +249,7 @@ begin
                 when MMIO_OFF_UART_ST  => O_rdata <= X"0000000" & "000" & uart_busy;
                 when MMIO_OFF_TIMER    => O_rdata <= std_logic_vector(r_timer);
                 when MMIO_OFF_JOYSTICK => O_rdata <= X"000000" & '0' & I_joystick;
+                when MMIO_OFF_UART_RX  => O_rdata <= X"000000" & "0000000" & r_uart_rx_ready & r_uart_rx_data;
                 when others            => O_rdata <= (others => '0');
             end case;
         end if;

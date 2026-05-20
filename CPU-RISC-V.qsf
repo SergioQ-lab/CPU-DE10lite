@@ -43,6 +43,7 @@ set_global_assignment -name VHDL_FILE src/cpu_core.vhd
 set_global_assignment -name VHDL_FILE src/main_memory.vhd
 set_global_assignment -name VHDL_FILE src/seven_seg.vhd
 set_global_assignment -name VHDL_FILE src/uart_tx.vhd
+set_global_assignment -name VHDL_FILE src/uart_rx.vhd
 set_global_assignment -name VHDL_FILE src/mmio_bridge.vhd
 set_global_assignment -name VHDL_FILE src/vga_framebuffer.vhd
 set_global_assignment -name VHDL_FILE src/soc.vhd
@@ -179,6 +180,10 @@ set_instance_assignment -name IO_STANDARD "3.3-V LVCMOS" -to VGA_B[*]
 # UART TX en Arduino IO[1] (PIN_AB6). Salida pura.
 set_location_assignment PIN_AB6 -to UART_TX
 set_instance_assignment -name IO_STANDARD "3.3-V LVCMOS" -to UART_TX
+
+# UART RX en Arduino IO[0] (PIN_AB5). Entrada.
+set_location_assignment PIN_AB5 -to UART_RX
+set_instance_assignment -name IO_STANDARD "3.3-V LVCMOS" -to UART_RX
 
 # JOYSTICK (Arduino IO8 a IO14)
 # IO8 (RST), IO9 (SET), IO10 (MID), IO11 (RIGHT), IO12 (LEFT), IO13 (DOWN), IO14 (UP)

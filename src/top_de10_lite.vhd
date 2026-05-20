@@ -32,6 +32,7 @@ entity top_de10_lite is
         VGA_G         : out std_logic_vector(3 downto 0);
         VGA_B         : out std_logic_vector(3 downto 0);
         UART_TX       : out std_logic;
+        UART_RX       : in  std_logic;
         JOYSTICK      : in  std_logic_vector(6 downto 0);
         
         -- SDRAM
@@ -70,6 +71,7 @@ architecture Behavioral of top_de10_lite is
             O_vga_g   : out std_logic_vector(3 downto 0);
             O_vga_b   : out std_logic_vector(3 downto 0);
             O_uart_tx : out std_logic;
+            I_uart_rx : in  std_logic;
             I_joystick: in  std_logic_vector(6 downto 0);
             
             O_sdram_clk  : out   std_logic;
@@ -120,6 +122,7 @@ begin
         O_vga_g   => VGA_G,
         O_vga_b   => VGA_B,
         O_uart_tx => UART_TX,
+        I_uart_rx => UART_RX,
         I_joystick=> JOYSTICK,
         
         O_sdram_clk  => DRAM_CLK,
