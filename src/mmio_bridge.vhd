@@ -249,7 +249,7 @@ begin
                 when MMIO_OFF_UART_ST  => O_rdata <= X"0000000" & "000" & uart_busy;
                 when MMIO_OFF_TIMER    => O_rdata <= std_logic_vector(r_timer);
                 when MMIO_OFF_JOYSTICK => O_rdata <= X"000000" & '0' & I_joystick;
-                when MMIO_OFF_UART_RX  => O_rdata <= X"000000" & "0000000" & r_uart_rx_ready & r_uart_rx_data;
+                when MMIO_OFF_UART_RX  => O_rdata <= X"00000" & "000" & r_uart_rx_ready & r_uart_rx_data;
                 when others            => O_rdata <= (others => '0');
             end case;
         end if;
