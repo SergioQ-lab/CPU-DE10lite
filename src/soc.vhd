@@ -53,6 +53,7 @@ entity soc is
 
         -- UART
         O_uart_tx : out std_logic;
+        I_uart_rx : in  std_logic;
 
         -- Joystick
         I_joystick: in  std_logic_vector(6 downto 0);
@@ -154,7 +155,8 @@ architecture Behavioral of soc is
             O_pal_we    : out std_logic;
             O_pal_index : out std_logic_vector(3 downto 0);
             O_pal_data  : out std_logic_vector(11 downto 0);
-            I_joystick  : in  std_logic_vector(6 downto 0)
+            I_joystick  : in  std_logic_vector(6 downto 0);
+            I_uart_rx   : in  std_logic
         );
     end component;
 
@@ -403,7 +405,8 @@ begin
         O_pal_we    => pal_we,
         O_pal_index => pal_index,
         O_pal_data  => pal_data,
-        I_joystick  => I_joystick
+        I_joystick  => I_joystick,
+        I_uart_rx   => I_uart_rx
     );
 
     ---------------------------------------------------------------------------
